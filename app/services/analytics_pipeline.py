@@ -1,4 +1,3 @@
-
 """
 Analytics data pipeline for the Weevo Interactive Analytics Dashboard.
 
@@ -91,7 +90,11 @@ WEEVO_API_BASE_URL = os.getenv("WEEVO_API_BASE_URL", "https://eg.api.weevoapp.co
 # One combined pull covers every status in a date range, so there is no
 # more "WEEVO_STATUS_OPTIONS" per-status loop to configure.
 ADMIN_SHIPMENTS_PATH = "/api/v1/admin-5678vna9k6/shipments"
-ADMIN_PAGE_SIZE = 100          # matches `paginate` in the confirmed example request
+ADMIN_PAGE_SIZE = 500          # raised from 100 (2026-07-18): confirmed working
+                               # up to 500 (and 1000) via the official dashboard's
+                               # "Rows per Page" control on the same admin endpoint —
+                               # fewer, larger pages means far fewer requests to
+                               # cover the same date range inside FETCH_TIME_BUDGET_V1
 ADMIN_DEFAULT_COUNTRY_ID = 1   # confirmed always 1
 ADMIN_DEFAULT_IN_BATCH = 0     # confirmed default, same as the official dashboard
 
