@@ -1535,3 +1535,6 @@ def render_analytics_page():
 # st.dataframe / st.markdown, all bundled with streamlit==1.29.0
 # already pinned in requirements.txt.
 # ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    st.set_page_config(page_title="Analytics", layout="wide")
+    render_analytics_page()
