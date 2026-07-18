@@ -25,6 +25,9 @@ from datetime import datetime, timedelta
 import pandas as pd
 import streamlit as st
 
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from app.services.analytics_pipeline import (
     load_shipments,
     orders_over_time,
@@ -66,6 +69,10 @@ DATED_STATUSES = HEAVY_STATUSES_V1
 # (2026-07-10). Kept fully separate from the v1 functions above — nothing
 # above this import changes, this only adds the new Financial/Risk section
 # further down the page.
+
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from app.services.analytics_pipeline_v2 import (
     load_shipments_v2,
     build_v2_dataframe,  # ADDED (2026-07-15) — pure mapping, used on the same shared raw pull as v1
