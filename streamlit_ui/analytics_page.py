@@ -1094,9 +1094,9 @@ def render_analytics_page():
                 unsafe_allow_html=True,
             )
             st.dataframe(
-                least_couriers.rename(columns={"courier_name": "Courier", "orders": "Orders", "total_value": "Handled value (EGP)"}),
+                least_couriers.rename(columns={"courier_name": "Courier", "orders": "Orders", "total_value": "Order value (EGP) (amount)"}),
                 use_container_width=True, hide_index=True, height=280,
-                column_config={"Handled value (EGP)": st.column_config.NumberColumn(format="%.0f")},
+                column_config={"Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f")},
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1109,18 +1109,20 @@ def render_analytics_page():
     # ---- All couriers, full ranking (ADDED 2026-07-19) ---------------------
     all_couriers = courier_leaderboard(df, n=df["courier_name"].nunique() if "courier_name" in df.columns else 0)
     if not all_couriers.empty:
-        st.markdown('<div class="wa-section">', unsafe_allow_html=True)
-        st.markdown(
-            '<p class="wa-section-title">All couriers</p>'
-            '<p class="wa-section-sub">Every courier with at least one order in this window, most to least active</p>',
-            unsafe_allow_html=True,
-        )
-        st.dataframe(
-            all_couriers.rename(columns={"courier_name": "Courier", "orders": "Orders", "total_value": "Handled value (EGP)"}),
-            use_container_width=True, hide_index=True, height=min(560, 45 + 35 * len(all_couriers)),
-            column_config={"Handled value (EGP)": st.column_config.NumberColumn(format="%.0f")},
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
+        all_couriers_col, _ = st.columns(2)
+        with all_couriers_col:
+            st.markdown('<div class="wa-section">', unsafe_allow_html=True)
+            st.markdown(
+                '<p class="wa-section-title">All couriers</p>'
+                '<p class="wa-section-sub">Every courier with at least one order in this window, most to least active</p>',
+                unsafe_allow_html=True,
+            )
+            st.dataframe(
+                all_couriers.rename(columns={"courier_name": "Courier", "orders": "Orders", "total_value": "Order value (EGP) (amount)"}),
+                use_container_width=True, hide_index=True, height=280,
+                column_config={"Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f")},
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
 
     # NOTE: the old "2-hour promise tracking" section that used to live here
     # has been removed (2026-07-10, per Ahmed's direction). It measured the
@@ -1141,9 +1143,9 @@ def render_analytics_page():
         st.markdown('<p class="wa-section-title">Top merchants by orders</p>', unsafe_allow_html=True)
         top_merch = merchant_leaderboard(df, n=8)
         st.dataframe(
-            top_merch.rename(columns={"merchant_name": "Merchant", "orders": "Orders", "total_value": "Revenue (EGP)"}),
+            top_merch.rename(columns={"merchant_name": "Merchant", "orders": "Orders", "total_value": "Order value (EGP) (amount)"}),
             use_container_width=True, hide_index=True, height=300,
-            column_config={"Revenue (EGP)": st.column_config.NumberColumn(format="%.0f")},
+            column_config={"Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f")},
         )
         excluded = top_merch.attrs.get("excluded_unknown_count", 0)
         if excluded:
@@ -1179,9 +1181,9 @@ def render_analytics_page():
                 unsafe_allow_html=True,
             )
             st.dataframe(
-                least_merch.rename(columns={"merchant_name": "Merchant", "orders": "Orders", "total_value": "Revenue (EGP)"}),
+                least_merch.rename(columns={"merchant_name": "Merchant", "orders": "Orders", "total_value": "Order value (EGP) (amount)"}),
                 use_container_width=True, hide_index=True, height=280,
-                column_config={"Revenue (EGP)": st.column_config.NumberColumn(format="%.0f")},
+                column_config={"Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f")},
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1196,9 +1198,9 @@ def render_analytics_page():
                 unsafe_allow_html=True,
             )
             st.dataframe(
-                all_merch.rename(columns={"merchant_name": "Merchant", "orders": "Orders", "total_value": "Revenue (EGP)"}),
-                use_container_width=True, hide_index=True, height=min(560, 45 + 35 * len(all_merch)),
-                column_config={"Revenue (EGP)": st.column_config.NumberColumn(format="%.0f")},
+                all_merch.rename(columns={"merchant_name": "Merchant", "orders": "Orders", "total_value": "Order value (EGP) (amount)"}),
+                use_container_width=True, hide_index=True, height=280,
+                column_config={"Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f")},
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
