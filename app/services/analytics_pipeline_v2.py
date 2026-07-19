@@ -452,6 +452,29 @@ def creation_to_completion_summary(df: pd.DataFrame) -> dict:
     }
 
 
+def creation_to_completion_summary_by_status(df: pd.DataFrame) -> dict:
+    """Same measure as creation_to_completion_summary(), but delivered and
+    returned kept separate instead of blended (ADDED 2026-07-19) — a
+    returned shipment went out AND came back, so it's a naturally different
+    (usually longer) duration than a straightforward delivery, and blending
+    them into one average hid that difference."""
+    def _for(status: str, completion_col: str) -> dict:
+        seg = df[df["status"] == status]
+        hours = (seg[completion_col] - seg["created_at"]).dt.total_seconds() / 3600
+        valid = hours[hours.notna() & (hours >= 0)]
+        if valid.empty:
+            return {"avg_hours": None, "median_hours": None, "sample_size": 0}
+        return {
+            "avg_hours": round(valid.mean(), 2),
+            "median_hours": round(valid.median(), 2),
+            "sample_size": int(len(valid)),
+        }
+    return {
+        "delivered": _for("delivered", "delivered_at"),
+        "returned": _for("returned", "returned_at"),
+    }
+
+
 def creation_to_completion_by_area(df: pd.DataFrame, n: int = 5, ascending: bool = False) -> pd.DataFrame:
     """Avg creation-to-completion time per delivery area (the `area` column,
     detected from delivering_street) — fastest areas first if ascending=True,
