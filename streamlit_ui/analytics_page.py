@@ -822,19 +822,29 @@ def render_analytics_page():
                 # data exists (i.e. up through the last real shipment) with
                 # no separate fallback logic needed.
                 _widget_max_date = max(max_date, today_real)
+                # WIDENED LOWER BOUND (2026-07-19): min_date reflects only
+                # whatever is currently loaded — after picking a narrow
+                # custom range (e.g. 07/15-07/16), the next fetch only
+                # covers that span, so min_date collapsed to it too and the
+                # calendar got stuck unable to navigate to any earlier date
+                # (only a full page refresh, resetting to "All time",
+                # widened it back). Only future dates should ever be
+                # blocked; a fixed 2-year floor keeps navigation open
+                # regardless of how narrow the currently-loaded data is.
+                _widget_min_date = min(min_date, today_real - pd.Timedelta(days=730))
                 st.session_state.setdefault("wa_date_range_custom", (min_date, _widget_max_date))
                 _stored_custom = st.session_state["wa_date_range_custom"]
                 if _stored_custom is None:
                     _clamped_custom = (min_date, _widget_max_date)
                 elif isinstance(_stored_custom, (tuple, list)):
-                    _clamped_custom = tuple(min(max(d, min_date), _widget_max_date) for d in _stored_custom)
+                    _clamped_custom = tuple(min(max(d, _widget_min_date), _widget_max_date) for d in _stored_custom)
                 else:
-                    _clamped_custom = min(max(_stored_custom, min_date), _widget_max_date)
+                    _clamped_custom = min(max(_stored_custom, _widget_min_date), _widget_max_date)
                 if _clamped_custom != _stored_custom:
                     st.session_state["wa_date_range_custom"] = _clamped_custom
                 try:
                     date_range = st.date_input(
-                        "Pick dates", min_value=min_date, max_value=_widget_max_date,
+                        "Pick dates", min_value=_widget_min_date, max_value=_widget_max_date,
                         key="wa_date_range_custom",
                     )
                 except st.errors.StreamlitAPIException:
