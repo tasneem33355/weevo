@@ -1,4 +1,3 @@
-
 """
 Data Analytics page — plugs into the existing dashboard.py sidebar
 selectbox as one more option, alongside Test Tia / System Status / etc.
@@ -334,6 +333,14 @@ def render_analytics_page():
             and _custom[1]
         ):
             admin_start_date, admin_end_date = _custom
+        else:
+            # FIX (2026-07-19): see docstring above this block — reuse the
+            # last fully-resolved range instead of falling through to the
+            # 30-day default, so a mid-pick (only "From" chosen) never
+            # changes start_date/end_date and never triggers a re-fetch.
+            _last_resolved = st.session_state.get("wa_admin_resolved_range")
+            if _last_resolved:
+                admin_start_date, admin_end_date = _last_resolved
     if admin_start_date is None or admin_end_date is None:
         # BUG FIX (2026-07-16): "All time" used to send no date filter at
         # all, so the fetch tried to page through the entire history —
@@ -352,6 +359,7 @@ def render_analytics_page():
         admin_start_date = _today_real - timedelta(days=_preset_days)
     admin_start_str = admin_start_date.strftime("%Y-%m-%d") if admin_start_date else None
     admin_end_str = admin_end_date.strftime("%Y-%m-%d") if admin_end_date else None
+    st.session_state["wa_admin_resolved_range"] = (admin_start_date, admin_end_date)
 
     with st.sidebar:
         st.markdown("---")
