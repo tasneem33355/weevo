@@ -1106,6 +1106,22 @@ def render_analytics_page():
         "Risk section below, which uses actual pickup/completion timestamps."
     )
 
+    # ---- All couriers, full ranking (ADDED 2026-07-19) ---------------------
+    all_couriers = courier_leaderboard(df, n=df["courier_name"].nunique() if "courier_name" in df.columns else 0)
+    if not all_couriers.empty:
+        st.markdown('<div class="wa-section">', unsafe_allow_html=True)
+        st.markdown(
+            '<p class="wa-section-title">All couriers</p>'
+            '<p class="wa-section-sub">Every courier with at least one order in this window, most to least active</p>',
+            unsafe_allow_html=True,
+        )
+        st.dataframe(
+            all_couriers.rename(columns={"courier_name": "Courier", "orders": "Orders", "total_value": "Handled value (EGP)"}),
+            use_container_width=True, hide_index=True, height=min(560, 45 + 35 * len(all_couriers)),
+            column_config={"Handled value (EGP)": st.column_config.NumberColumn(format="%.0f")},
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
     # NOTE: the old "2-hour promise tracking" section that used to live here
     # has been removed (2026-07-10, per Ahmed's direction). It measured the
     # gap between date_to_receive_shipment and date_to_deliver_shipment —
@@ -1170,31 +1186,21 @@ def render_analytics_page():
             st.markdown("</div>", unsafe_allow_html=True)
 
     with col_d:
-        st.markdown('<div class="wa-section">', unsafe_allow_html=True)
-        st.markdown(
-            '<p class="wa-section-title">Merchants with zero orders</p>'
-            '<p class="wa-section-sub">Registered merchants who placed no orders at all in this window — '
-            'needs the full merchant list (a separate API call), not just what showed up in shipments.</p>',
-            unsafe_allow_html=True,
-        )
-        if source == "api" and api_key:
-            try:
-                roster = _cached_merchant_roster(api_key)
-            except Exception as e:
-                roster = pd.DataFrame()
-                st.caption(f"Couldn't load the full merchant roster: {e}")
-            if not roster.empty:
-                zero_order = merchants_with_zero_orders(roster, df)
-                st.caption(f"{len(roster):,} merchants registered in total — {len(zero_order):,} with zero orders here.")
-                st.dataframe(
-                    zero_order.rename(columns={"merchant_name": "Merchant", "merchant_id": "Merchant ID"}),
-                    use_container_width=True, hide_index=True, height=240,
-                )
-            else:
-                st.info("Full merchant roster came back empty — the /merchants endpoint may need checking.")
-        else:
-            st.info("Switch to Live API to load the full merchant roster for this comparison.")
-        st.markdown("</div>", unsafe_allow_html=True)
+        all_merch = merchant_leaderboard(df, n=df["merchant_name"].nunique() if "merchant_name" in df.columns else 0)
+        if not all_merch.empty:
+            st.markdown('<div class="wa-section">', unsafe_allow_html=True)
+            st.markdown(
+                '<p class="wa-section-title">All active merchants</p>'
+                '<p class="wa-section-sub">Every merchant with at least one order in this window, most to least active '
+                '— registered merchants who never placed an order are not included</p>',
+                unsafe_allow_html=True,
+            )
+            st.dataframe(
+                all_merch.rename(columns={"merchant_name": "Merchant", "orders": "Orders", "total_value": "Revenue (EGP)"}),
+                use_container_width=True, hide_index=True, height=min(560, 45 + 35 * len(all_merch)),
+                column_config={"Revenue (EGP)": st.column_config.NumberColumn(format="%.0f")},
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
 
     # ---- Merchant health --------------------------------------------------
     st.markdown('<div class="wa-section" id="merchant-health">', unsafe_allow_html=True)
