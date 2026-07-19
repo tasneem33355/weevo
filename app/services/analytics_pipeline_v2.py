@@ -389,7 +389,8 @@ def revenue_summary(df: pd.DataFrame) -> dict:
     completed = df[df["status"].isin(PRIMARY_STATUSES)]
     if completed.empty:
         return {"total_weevo_revenue": 0.0, "delivered_count": 0, "returned_count": 0,
-                "delivered_revenue": 0.0, "returned_revenue": 0.0, "return_rate_pct": 0.0}
+                "delivered_revenue": 0.0, "returned_revenue": 0.0,
+                "return_rate_pct": 0.0, "delivered_rate_pct": 0.0}
     delivered = completed[completed["status"] == "delivered"]
     returned = completed[completed["status"] == "returned"]
     return {
@@ -399,6 +400,7 @@ def revenue_summary(df: pd.DataFrame) -> dict:
         "delivered_revenue": round(delivered["weevo_revenue"].sum(), 2),
         "returned_revenue": round(returned["weevo_revenue"].sum(), 2),
         "return_rate_pct": round(len(returned) / len(completed) * 100, 1) if len(completed) else 0.0,
+        "delivered_rate_pct": round(len(delivered) / len(completed) * 100, 1) if len(completed) else 0.0,
     }
 
 
@@ -460,8 +462,10 @@ def financial_breakdown(df: pd.DataFrame) -> dict:
     empty_segment = {
         "count": 0, "shipping_revenue": 0.0, "transfer_fee_revenue": 0.0,
         "total_weevo_revenue": 0.0, "avg_weevo_revenue_per_order": 0.0,
+        "total_order_value": 0.0,
         "cod_count": 0, "online_count": 0,
-        "avg_client_order_value_cod": 0.0, "total_merchant_payout_cod": 0.0,
+        "avg_client_order_value_cod": 0.0, "avg_client_order_value_online": 0.0,
+        "total_merchant_payout_cod": 0.0,
     }
     if completed.empty:
         return {"delivered": empty_segment, "returned": empty_segment,
@@ -478,9 +482,11 @@ def financial_breakdown(df: pd.DataFrame) -> dict:
             "transfer_fee_revenue": round(seg["transfer_fee"].sum(), 2),
             "total_weevo_revenue": round(seg["weevo_revenue"].sum(), 2),
             "avg_weevo_revenue_per_order": round(seg["weevo_revenue"].mean(), 2),
+            "total_order_value": round(seg["amount"].sum(), 2),
             "cod_count": int(len(cod)),
             "online_count": int(len(online)),
             "avg_client_order_value_cod": round(cod["amount"].mean(), 2) if not cod.empty else 0.0,
+            "avg_client_order_value_online": round(online["amount"].mean(), 2) if not online.empty else 0.0,
             "total_merchant_payout_cod": round(cod["merchant_payout"].sum(), 2) if not cod.empty else 0.0,
         }
 
