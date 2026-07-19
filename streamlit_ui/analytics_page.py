@@ -1109,7 +1109,7 @@ def render_analytics_page():
     # ---- All couriers, full ranking (ADDED 2026-07-19) ---------------------
     all_couriers = courier_leaderboard(df, n=df["courier_name"].nunique() if "courier_name" in df.columns else 0)
     if not all_couriers.empty:
-        all_couriers_col, _ = st.columns(2)
+        all_couriers_col, all_couriers_chart_col = st.columns(2)
         with all_couriers_col:
             st.markdown('<div class="wa-section">', unsafe_allow_html=True)
             st.markdown(
@@ -1122,6 +1122,15 @@ def render_analytics_page():
                 use_container_width=True, hide_index=True, height=280,
                 column_config={"Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f")},
             )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with all_couriers_chart_col:
+            st.markdown('<div class="wa-section">', unsafe_allow_html=True)
+            st.markdown(
+                '<p class="wa-section-title">Orders by courier</p>'
+                '<p class="wa-section-sub">Same ranking as the table, visualized</p>',
+                unsafe_allow_html=True,
+            )
+            st.bar_chart(all_couriers.set_index("courier_name")[["orders"]], y="orders", color=PURPLE, height=280)
             st.markdown("</div>", unsafe_allow_html=True)
 
     # NOTE: the old "2-hour promise tracking" section that used to live here
