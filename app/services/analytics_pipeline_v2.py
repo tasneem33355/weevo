@@ -418,6 +418,75 @@ def delivery_time_summary(df: pd.DataFrame) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Creation-to-completion time analysis (ADDED 2026-07-19)
+# ---------------------------------------------------------------------------
+# delivery_time_summary() above is permanently empty — the Admin Dashboard
+# API has no `logs` array, so there is no real actual-pickup timestamp to
+# measure from (see parse_shipment's comment). These functions measure from
+# created_at instead, which — like delivered_date_at/returned_date_at — is a
+# real, fixed event timestamp the API actually returns. They deliberately
+# do NOT use date_to_receive_shipment / date_to_deliver_shipment: those are
+# target/expected times a dispatcher can reassign, not a fixed record of
+# what actually happened, so they're not a reliable performance measure.
+def _lifecycle_hours(df: pd.DataFrame) -> pd.Series:
+    """created_at -> delivered_at/returned_at, in hours. Only rows with a
+    valid non-negative duration are kept (guards against bad/out-of-order
+    data, same convention as delivery_hours above)."""
+    completed = df[df["status"].isin(PRIMARY_STATUSES)]
+    completed_at = completed["delivered_at"].fillna(completed["returned_at"])
+    hours = (completed_at - completed["created_at"]).dt.total_seconds() / 3600
+    return hours[hours.notna() & (hours >= 0)]
+
+
+def creation_to_completion_summary(df: pd.DataFrame) -> dict:
+    """Avg/median time from order creation to actual delivered/returned
+    completion — the real-timestamp-only replacement for delivery_time_summary."""
+    valid = _lifecycle_hours(df)
+    if valid.empty:
+        return {"avg_hours": None, "median_hours": None, "sample_size": 0}
+    return {
+        "avg_hours": round(valid.mean(), 2),
+        "median_hours": round(valid.median(), 2),
+        "sample_size": int(len(valid)),
+    }
+
+
+def creation_to_completion_by_area(df: pd.DataFrame, n: int = 5, ascending: bool = False) -> pd.DataFrame:
+    """Avg creation-to-completion time per delivery area (the `area` column,
+    detected from delivering_street) — fastest areas first if ascending=True,
+    slowest first if ascending=False. 'Unknown' (address didn't match a
+    known area) is excluded, same as the existing Top areas chart."""
+    completed = df[df["status"].isin(PRIMARY_STATUSES)].copy()
+    completed_at = completed["delivered_at"].fillna(completed["returned_at"])
+    completed["lifecycle_hours"] = (completed_at - completed["created_at"]).dt.total_seconds() / 3600
+    valid = completed[
+        completed["lifecycle_hours"].notna() & (completed["lifecycle_hours"] >= 0)
+        & (completed["area"] != "Unknown")
+    ]
+    if valid.empty:
+        return pd.DataFrame(columns=["area", "avg_hours", "orders"])
+    grouped = valid.groupby("area")["lifecycle_hours"].agg(avg_hours="mean", orders="count").reset_index()
+    grouped["avg_hours"] = grouped["avg_hours"].round(2)
+    return grouped.sort_values("avg_hours", ascending=ascending).head(n).reset_index(drop=True)
+
+
+def creation_to_completion_by_hour(df: pd.DataFrame) -> pd.DataFrame:
+    """Avg creation-to-completion time grouped by the hour of day (0-23)
+    the order was CREATED (created_at) — shows whether orders placed at
+    certain hours consistently take longer to complete, all 24 hours
+    present in the data, sorted by hour for a clean time-of-day chart."""
+    valid_hours = _lifecycle_hours(df)
+    completed = df.loc[valid_hours.index].copy()
+    completed["lifecycle_hours"] = valid_hours
+    completed["hour_of_day"] = completed["created_at"].dt.hour
+    if completed.empty:
+        return pd.DataFrame(columns=["hour_of_day", "avg_hours", "orders"])
+    grouped = completed.groupby("hour_of_day")["lifecycle_hours"].agg(avg_hours="mean", orders="count").reset_index()
+    grouped["avg_hours"] = grouped["avg_hours"].round(2)
+    return grouped.sort_values("hour_of_day").reset_index(drop=True)
+
+
 def at_risk_shipments(df: pd.DataFrame) -> pd.DataFrame:
     """Shipments still in flight whose target delivery time has already
     passed — the 'captain still has orders overdue' alert Ahmed described.
