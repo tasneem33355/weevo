@@ -208,7 +208,7 @@ def _inject_css():
         .wa-title {{ font-size: 26px; font-weight: 700; color: {INK}; margin: 0; }}
         .wa-subtitle {{ font-size: 13px; color: {MUTED}; margin: 2px 0 0; }}
         .wa-synced {{ font-size: 12px; color: {MUTED}; text-align: right; }}
-        .wa-kpi-row {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 18px 0 22px; }}
+        .wa-kpi-row {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 18px 0 22px; }}
         .wa-kpi {{
             background: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 14px;
             padding: 14px 16px; position: relative; overflow: hidden;
@@ -968,7 +968,6 @@ def render_analytics_page():
 
     cards = [
         ("📦", "#EEEDFE", PURPLE, "Total orders", f"{kpis['total_orders']:,}", orders_breakdown_txt, "orders-breakdown"),
-        ("💰", "#E1F5EE", TEAL, "Gross order value", f"{kpis['total_revenue']:,.0f} EGP", value_breakdown_txt, "orders-breakdown"),
         ("🚴", "#E6F1FB", "#185FA5", "Active couriers", f"{kpis['active_couriers']}", "Click for full leaderboard + least-active", "courier-leaderboard"),
         ("🏬", "#FAEEDA", AMBER, "Active merchants", f"{kpis['active_merchants']}", "Click for top/least-active merchants", "merchant-tables"),
         ("⚠️", "#FCEBEB", RED, "Merchants at risk", f"{kpis['merchants_at_risk']}", f"{kpis['merchants_at_risk']} declining + {watch_count} watch", "merchant-health"),
