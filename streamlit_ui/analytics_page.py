@@ -79,8 +79,8 @@ from app.services.analytics_pipeline_v2 import (
     financial_breakdown,
     delivery_time_summary as v2_delivery_time_summary,
     creation_to_completion_summary,
+    creation_to_completion_summary_by_status,
     creation_to_completion_by_area,
-    creation_to_completion_by_hour,
     at_risk_shipments,
     risk_by_courier,
     overdue_age_buckets,
@@ -1512,15 +1512,35 @@ def render_analytics_page():
                         '<p class="wa-section-title" style="font-size:14px;">Order lifecycle time (creation → completion)</p>',
                         unsafe_allow_html=True,
                     )
-                    ct1, ct2, ct3 = st.columns(3)
-                    ct1.metric("Avg. creation → completion", f"{cts['avg_hours']} hrs")
-                    ct2.metric("Median creation → completion", f"{cts['median_hours']} hrs")
-                    ct3.metric("Based on", f"{cts['sample_size']:,} shipments")
+                    # SPLIT (2026-07-19): delivered and returned kept separate
+                    # instead of one blended average — a returned shipment went
+                    # out AND came back, so lumping it in with straightforward
+                    # deliveries hid that it's a naturally different duration.
+                    cts_split = creation_to_completion_summary_by_status(df_v2)
+                    csd, csr = cts_split["delivered"], cts_split["returned"]
+                    lt_col1, lt_col2 = st.columns(2)
+                    with lt_col1:
+                        st.markdown("**🚚 Delivered**")
+                        if csd["sample_size"] > 0:
+                            st.write(f"- Avg. creation → delivered *(created_at → delivered_date_at)*: **{csd['avg_hours']} hrs**")
+                            st.write(f"- Median: **{csd['median_hours']} hrs**")
+                            st.write(f"- Based on {csd['sample_size']:,} shipments")
+                        else:
+                            st.caption("No delivered shipments with both timestamps yet.")
+                    with lt_col2:
+                        st.markdown("**↩️ Returned**")
+                        if csr["sample_size"] > 0:
+                            st.write(f"- Avg. creation → returned *(created_at → returned_date_at)*: **{csr['avg_hours']} hrs**")
+                            st.write(f"- Median: **{csr['median_hours']} hrs**")
+                            st.write(f"- Based on {csr['sample_size']:,} shipments")
+                        else:
+                            st.caption("No returned shipments with both timestamps yet.")
                     st.caption(
-                        "Measured from order creation *(created_at)* to actual delivery/return "
-                        "*(delivered_date_at / returned_date_at)* — the closest real, fixed-timestamp "
-                        "measure available; the Admin API has no actual courier-pickup-scan event to "
-                        "measure from instead."
+                        "Delivered = time from order creation *(created_at)* to actual delivery "
+                        "*(delivered_date_at)*. Returned = time from order creation to actual return "
+                        "*(returned_date_at)* — naturally longer, since the shipment went out and came "
+                        "back. The Admin API has no actual courier-pickup-scan event to split this "
+                        "further into 'time to pick up' vs. 'time in transit'."
                     )
 
                     fastest_areas = creation_to_completion_by_area(df_v2, n=5, ascending=True)
@@ -1538,24 +1558,6 @@ def render_analytics_page():
                             "Avg. hours from order creation *(created_at)* to completion "
                             "*(delivered_date_at / returned_date_at)*, grouped by delivery area "
                             "*(area, detected from delivering_street)*. 'Unknown' addresses excluded."
-                        )
-
-                    by_hour = creation_to_completion_by_hour(df_v2)
-                    if not by_hour.empty:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        st.markdown(
-                            '<p class="wa-section-title" style="font-size:14px;">Lifecycle time by hour order was created</p>',
-                            unsafe_allow_html=True,
-                        )
-                        st.bar_chart(by_hour.set_index("hour_of_day")[["avg_hours"]], y="avg_hours", color=PURPLE, height=220)
-                        fastest_hr = by_hour.loc[by_hour["avg_hours"].idxmin()]
-                        slowest_hr = by_hour.loc[by_hour["avg_hours"].idxmax()]
-                        st.caption(
-                            f"Fastest around {int(fastest_hr['hour_of_day']):02d}:00 (avg "
-                            f"{fastest_hr['avg_hours']} hrs, {int(fastest_hr['orders']):,} orders) — "
-                            f"slowest around {int(slowest_hr['hour_of_day']):02d}:00 (avg "
-                            f"{slowest_hr['avg_hours']} hrs, {int(slowest_hr['orders']):,} orders). "
-                            "Hour taken from order creation time *(created_at)*."
                         )
                 else:
                     st.caption("No shipments with both a creation and completion timestamp yet.")
