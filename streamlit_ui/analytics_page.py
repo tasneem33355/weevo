@@ -1381,10 +1381,17 @@ def render_analytics_page():
         else:
             if "created_at" in df_v2_dated.columns and df_v2_dated["created_at"].notna().any():
                 pulled_from = "the API" if not v2_from_archive else "the saved archive"
+                # FIX (2026-07-19): this used to describe an older fetch that
+                # pulled a fixed 200 most-recent orders per status regardless
+                # of date (pre-2026-07-15 admin-API migration). It now shares
+                # the same date-filtered fetch as the main section above, so
+                # it DOES respect the selected calendar range — the wording
+                # was leftover from that old behavior and no longer matched
+                # reality.
                 st.caption(
                     f"📅 Covers orders created {df_v2_dated['created_at'].min():%d %b} → "
-                    f"{df_v2_dated['created_at'].max():%d %b} — most recent 200 delivered + 200 "
-                    f"returned pulled from {pulled_from}, not a fixed calendar window."
+                    f"{df_v2_dated['created_at'].max():%d %b} — every delivered + returned order "
+                    f"in the selected date range, pulled from {pulled_from}."
                 )
             # Clamp warning — same idea as the main section above: tell the
             # user explicitly when the selected preset asked for more
@@ -1414,11 +1421,12 @@ def render_analytics_page():
 
             # --- Revenue ---------------------------------------------------
             rev = revenue_summary(df_v2)
-            rc1, rc2, rc3, rc4 = st.columns(4)
+            rc1, rc2, rc3, rc4, rc5 = st.columns(5)
             rc1.metric("Weevo revenue (delivered + returned)", f"{rev['total_weevo_revenue']:,.0f} EGP")
             rc2.metric("Delivered orders", f"{rev['delivered_count']:,}")
             rc3.metric("Returned orders", f"{rev['returned_count']:,}")
-            rc4.metric("Return rate", f"{rev['return_rate_pct']}%")
+            rc4.metric("Delivered rate", f"{rev['delivered_rate_pct']}%")
+            rc5.metric("Return rate", f"{rev['return_rate_pct']}%")
             st.caption(
                 "Revenue = agreed shipping cost + transfer fee (1% of COD amount, 0 for online "
                 "payments) — Weevo's actual take per shipment, not the customer's order value."
@@ -1432,23 +1440,29 @@ def render_analytics_page():
             fin_col1, fin_col2 = st.columns(2)
             with fin_col1:
                 st.markdown(f"**✅ Delivered ({d['count']:,} orders)**")
-                st.write(f"- Shipping revenue: **{d['shipping_revenue']:,.0f} EGP**")
-                st.write(f"- Transfer fee revenue (1% COD): **{d['transfer_fee_revenue']:,.0f} EGP**")
-                st.write(f"- Total Weevo revenue: **{d['total_weevo_revenue']:,.0f} EGP**")
-                st.write(f"- Avg. revenue per order: **{d['avg_weevo_revenue_per_order']:,.2f} EGP**")
-                st.write(f"- Payment split: {d['cod_count']:,} COD · {d['online_count']:,} online")
+                st.write(f"- Shipping revenue *(agreed_shipping_cost)*: **{d['shipping_revenue']:,.0f} EGP**")
+                st.write(f"- Transfer fee revenue (1% COD) *(transfer_fee)*: **{d['transfer_fee_revenue']:,.0f} EGP**")
+                st.write(f"- Total Weevo revenue *(agreed_shipping_cost + transfer_fee)*: **{d['total_weevo_revenue']:,.0f} EGP**")
+                st.write(f"- Avg. revenue per order *(weevo_revenue)*: **{d['avg_weevo_revenue_per_order']:,.2f} EGP**")
+                st.write(f"- Total order value *(amount)*: **{d['total_order_value']:,.0f} EGP**")
+                st.write(f"- Payment split *(payment_method)*: {d['cod_count']:,} COD · {d['online_count']:,} online")
                 if d["cod_count"]:
-                    st.write(f"- Avg. COD order value: **{d['avg_client_order_value_cod']:,.0f} EGP**")
-                    st.write(f"- Total handed back to merchants (COD): **{d['total_merchant_payout_cod']:,.0f} EGP**")
+                    st.write(f"- Avg. COD order value *(amount)*: **{d['avg_client_order_value_cod']:,.0f} EGP**")
+                    st.write(f"- Total handed back to merchants (COD) *(merchant_payout)*: **{d['total_merchant_payout_cod']:,.0f} EGP**")
+                if d["online_count"]:
+                    st.write(f"- Avg. online order value *(amount)*: **{d['avg_client_order_value_online']:,.0f} EGP**")
             with fin_col2:
                 st.markdown(f"**↩️ Returned ({r['count']:,} orders)**")
-                st.write(f"- Shipping revenue: **{r['shipping_revenue']:,.0f} EGP**")
-                st.write(f"- Transfer fee revenue (1% COD): **{r['transfer_fee_revenue']:,.0f} EGP**")
-                st.write(f"- Total Weevo revenue: **{r['total_weevo_revenue']:,.0f} EGP**")
-                st.write(f"- Avg. revenue per order: **{r['avg_weevo_revenue_per_order']:,.2f} EGP**")
-                st.write(f"- Payment split: {r['cod_count']:,} COD · {r['online_count']:,} online")
+                st.write(f"- Shipping revenue *(agreed_shipping_cost)*: **{r['shipping_revenue']:,.0f} EGP**")
+                st.write(f"- Transfer fee revenue (1% COD) *(transfer_fee)*: **{r['transfer_fee_revenue']:,.0f} EGP**")
+                st.write(f"- Total Weevo revenue *(agreed_shipping_cost + transfer_fee)*: **{r['total_weevo_revenue']:,.0f} EGP**")
+                st.write(f"- Avg. revenue per order *(weevo_revenue)*: **{r['avg_weevo_revenue_per_order']:,.2f} EGP**")
+                st.write(f"- Total order value *(amount)*: **{r['total_order_value']:,.0f} EGP**")
+                st.write(f"- Payment split *(payment_method)*: {r['cod_count']:,} COD · {r['online_count']:,} online")
                 if r["cod_count"]:
-                    st.write(f"- Avg. COD order value: **{r['avg_client_order_value_cod']:,.0f} EGP**")
+                    st.write(f"- Avg. COD order value *(amount)*: **{r['avg_client_order_value_cod']:,.0f} EGP**")
+                if r["online_count"]:
+                    st.write(f"- Avg. online order value *(amount)*: **{r['avg_client_order_value_online']:,.0f} EGP**")
 
             if fin["returned_revenue_vs_order_value_pct"] is not None:
                 pct = fin["returned_revenue_vs_order_value_pct"]
