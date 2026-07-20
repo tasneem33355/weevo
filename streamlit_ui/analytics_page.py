@@ -47,34 +47,18 @@ from app.services.analytics_pipeline import (
     enrich_areas_with_cache,
     classify_unknown_addresses,
     HEAVY_STATUSES_V1,
-    # ADDED (2026-07-15 admin-API migration): one shared fetch + a pure
-    # per-pipeline dataframe builder, so both this page's main section and
-    # its Financial/Risk section can be built from the exact same raw pull.
     fetch_admin_shipments,
     build_shipments_dataframe,
 )
 
-# Statuses whose delivery_date is a REAL event timestamp (order actually
-# received/delivered) vs. a scheduled/target one (in-flight statuses use
-# date_to_receive_shipment as a planned pickup time, which can be today,
-# tomorrow, or occasionally a stale target far in the past — see the date
-# range filter below for why this distinction matters). Reuses the same
-# set the pipeline already uses for its own heavy/light pagination split,
-# so the two can't drift apart.
 DATED_STATUSES = HEAVY_STATUSES_V1
-
-# v2: separate module, talks to the real Weevo API directly using the exact
-# field names/financial formula confirmed from a live raw JSON response
-# (2026-07-10). Kept fully separate from the v1 functions above — nothing
-# above this import changes, this only adds the new Financial/Risk section
-# further down the page.
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.services.analytics_pipeline_v2 import (
     load_shipments_v2,
-    build_v2_dataframe,  # ADDED (2026-07-15) — pure mapping, used on the same shared raw pull as v1
+    build_v2_dataframe,
     revenue_summary,
     financial_breakdown,
     delivery_time_summary as v2_delivery_time_summary,
@@ -113,8 +97,6 @@ STATUS_STYLE = {
     "Declining": ("#A32D2D", "#FCEBEB", "🔴"),
 }
 
-# Same visual language as STATUS_STYLE above, keyed by the courier
-# shift-risk labels (which already include their own emoji prefix).
 RISK_STYLE = {
     "🟢 Healthy":  ("#0F6E56", "#E1F5EE"),
     "🟡 Watch":    ("#854F0B", "#FAEEDA"),
@@ -122,8 +104,7 @@ RISK_STYLE = {
     "🔴 Overdue":  ("#7A1F1F", "#F6D9D9"),
 }
 
-CACHE_TTL_SECONDS = 300  # 5 minutes
-
+CACHE_TTL_SECONDS = 300
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Fetching latest shipment data from Weevo…")
 def _cached_admin_shipments(api_key: str, start_date, end_date):
@@ -143,7 +124,6 @@ def _cached_admin_shipments(api_key: str, start_date, end_date):
     fetch time budget inside fetch_admin_shipments itself).
     """
     return fetch_admin_shipments(api_key=api_key, start_date=start_date, end_date=end_date)
-
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Fetching latest shipment data from Weevo…")
 def _cached_api_load(api_key: str, start_date=None, end_date=None) -> pd.DataFrame:
@@ -167,7 +147,6 @@ def _cached_api_load(api_key: str, start_date=None, end_date=None) -> pd.DataFra
     raw_records, status_counts, fetch_meta = _cached_admin_shipments(api_key, start_date, end_date)
     return build_shipments_dataframe(raw_records, fetch_meta=fetch_meta, status_counts=status_counts)
 
-
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Pulling delivered/returned shipments for financial + risk analysis…")
 def _cached_v2_load(api_key: str, start_date=None, end_date=None) -> pd.DataFrame:
     """
@@ -180,7 +159,6 @@ def _cached_v2_load(api_key: str, start_date=None, end_date=None) -> pd.DataFram
     """
     raw_records, _status_counts, fetch_meta = _cached_admin_shipments(api_key, start_date, end_date)
     return build_v2_dataframe(raw_records, fetch_meta=fetch_meta)
-
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Fetching full merchant roster…")
 def _cached_merchant_roster(api_key: str) -> pd.DataFrame:
@@ -196,7 +174,6 @@ def _cached_merchant_roster(api_key: str) -> pd.DataFrame:
     """
     return fetch_merchants(api_key=api_key)
 
-
 def _clean(html: str) -> str:
     """
     Streamlit/Markdown gotcha fix: any line that starts with 4+ spaces of
@@ -207,7 +184,6 @@ def _clean(html: str) -> str:
     st.markdown, without touching the actual HTML structure/content.
     """
     return re.sub(r"\n[ \t]+", "\n", html).strip()
-
 
 def _inject_css():
     st.markdown(
@@ -261,7 +237,6 @@ def _inject_css():
         unsafe_allow_html=True,
     )
 
-
 def _kpi_card(icon: str, icon_bg: str, icon_color: str, label: str, value: str, delta: str, delta_color: str,
               breakdown: str = "", anchor: str = "") -> str:
     breakdown_html = f'<div class="wa-kpi-breakdown">{breakdown}</div>' if breakdown else ""
@@ -278,67 +253,16 @@ def _kpi_card(icon: str, icon_bg: str, icon_color: str, label: str, value: str, 
         return f'<a class="wa-kpi-link" href="#{anchor}">{card}</a>'
     return card
 
-
 def render_analytics_page():
     st.markdown('<div id="weevo-analytics">', unsafe_allow_html=True)
     _inject_css()
 
-    # =========================================================================
-    # TEMPORARY DEBUG (2026-07-16, 401 investigation) — REMOVE once resolved.
-    # Placed here, at the very top of the page body (not the sidebar, not an
-    # expander that could go unnoticed), so it's visible immediately without
-    # needing Streamlit Cloud log/secrets access. Traces the ONE point where
-    # api_key becomes a concrete value in this app: os.environ["WEEVO_API_KEY"]
-    # (Streamlit secrets.toml root-level entries are exposed as env vars
-    # automatically — entries nested under a [section] are NOT), with the
-    # sidebar's session-only text_input as the only fallback if that's empty.
-    # Nothing else in the codebase sources api_key from anywhere else — no
-    # config file, no direct GitHub Actions secret read at runtime. Shows
-    # only existence/length/a 12-char prefix — never the full secret — so it
-    # can be compared against the JWT captured from the Weevo Admin Dashboard.
-    _debug_api_key = os.environ.get("WEEVO_API_KEY", "")
-    st.markdown(
-        _clean(f"""
-        <div style="background:#FFF4E5; border:1px solid #FFD79A; color:#8A5300;
-                     padding:10px 14px; border-radius:10px; font-size:13px; margin-bottom:12px;">
-        <b>🔧 TEMPORARY DEBUG — api_key (WEEVO_API_KEY) at runtime</b><br>
-        exists: <b>{bool(_debug_api_key)}</b> &nbsp;|&nbsp;
-        length: <b>{len(_debug_api_key)}</b> &nbsp;|&nbsp;
-        prefix (first 12 chars): <b>{_debug_api_key[:12] if _debug_api_key else "(empty)"}</b>
-        </div>
-        """),
-        unsafe_allow_html=True,
-    )
-    # --- END TEMPORARY DEBUG -------------------------------------------------
-
-    # ---- Server-side date filter — computed BEFORE the fetch (ADDED) ------
-    # The date-range picker widget itself still renders further down the
-    # page in its ORIGINAL spot (see "Date range filter" below) — nothing
-    # about its position, label, or options changes. This block only reads
-    # whatever value is ALREADY in st.session_state for that widget's key,
-    # so the live-API fetch below can use it too. Streamlit updates
-    # session_state for a widget's key before the script reruns on that
-    # widget's own change, so by the time this block runs on the rerun
-    # triggered by picking a new preset, the new value is already here.
-    #
-    # This is the fix for the CEO's top priority: previously "Last 7 days"
-    # only sliced an already-loaded, bounded "most recent N" pull
-    # client-side — now the exact same preset is sent to the Admin
-    # Dashboard backend (start_delivery_date/end_delivery_date) BEFORE any
-    # analytics are calculated, so the numbers match the official
-    # dashboard for that range. "All time" is unchanged: no date filter is
-    # sent at all, same as it always meant — no new artificial limit.
     _preset = st.session_state.get("wa_date_preset", "All time")
     _today_real = datetime.now().date()
     admin_start_date = None
     admin_end_date = None
     if _preset == "Custom range":
         _custom = st.session_state.get("wa_date_range_custom")
-        # GUARD (2026-07-17): mid-selection (e.g. only "From" picked, "To"
-        # not yet chosen), Streamlit's range date_input stores a bare
-        # datetime.date here instead of a tuple/list — len() on a plain
-        # date raises TypeError. Only treat it as a complete range when
-        # it's actually a 2-item tuple/list.
         if (
             isinstance(_custom, (tuple, list))
             and len(_custom) == 2
@@ -347,26 +271,10 @@ def render_analytics_page():
         ):
             admin_start_date, admin_end_date = _custom
         else:
-            # FIX (2026-07-19): see docstring above this block — reuse the
-            # last fully-resolved range instead of falling through to the
-            # 30-day default, so a mid-pick (only "From" chosen) never
-            # changes start_date/end_date and never triggers a re-fetch.
             _last_resolved = st.session_state.get("wa_admin_resolved_range")
             if _last_resolved:
                 admin_start_date, admin_end_date = _last_resolved
     if admin_start_date is None or admin_end_date is None:
-        # BUG FIX (2026-07-16): "All time" used to send no date filter at
-        # all, so the fetch tried to page through the entire history —
-        # hitting the 90s per-status time budget ("Stopped after the 90s
-        # time budget (page 72 of 1397)") long before reaching the end.
-        # Falling back to the same reasonable default window as "Last 30
-        # days" keeps the page fast by requesting fewer pages, without
-        # touching the time budget itself. Named presets are unaffected
-        # (each still maps to its own day count); "All time" resolves
-        # through this same default via dict.get's fallback — and so does
-        # "Custom range" before the user has finished picking both dates
-        # (2026-07-17: previously left start/end at None in that case,
-        # same unbounded-fetch defect as the old "All time" bug).
         _preset_days = {"Last 24 hours": 1, "Last 7 days": 7, "Last 30 days": 30}.get(_preset, 30)
         admin_end_date = _today_real
         admin_start_date = _today_real - timedelta(days=_preset_days)
@@ -401,12 +309,6 @@ def render_analytics_page():
                            f"filters/clicks reuse it instead of re-fetching every time.")
                 if st.button("🔄 Refresh now", help="Fetch the latest data immediately, bypassing the cache."):
                     _cached_api_load.clear()
-                    # No explicit st.rerun() needed: this button click already
-                    # triggers a full script rerun on its own (standard
-                    # Streamlit behavior), and this cache-clear happens earlier
-                    # in that same rerun than the _cached_api_load() call below
-                    # — so the next load is already fresh without forcing a
-                    # second rerun on top of it.
 
         archive_path = DEFAULT_ARCHIVE_PATH
         v2_archive_path = DEFAULT_V2_ARCHIVE_PATH
@@ -461,14 +363,10 @@ def render_analytics_page():
                 df_all, active_source_label = _fallback("api", "No Integration key provided.")
             else:
                 df_all = _cached_api_load(api_key, start_date=admin_start_str, end_date=admin_end_str)
-                # Cheap (local file read only) — makes any address classified
-                # via the "Classify unknown areas with AI" button below show
-                # up immediately on rerun, without waiting for the 5-minute
-                # API cache to expire or re-hitting the slow Weevo API.
                 df_all = enrich_areas_with_cache(df_all)
         elif source == "db":
             df_all = load_shipments(source="db", db_path=db_path)
-        else:  # archive
+        else:
             if uploaded_files:
                 for f in uploaded_files:
                     try:
@@ -485,7 +383,6 @@ def render_analytics_page():
     except (ConnectionError, ValueError) as e:
         df_all, active_source_label = _fallback("api", str(e))
 
-    # ---- Header ---------------------------------------------------------
     badge_color = (
         TEAL if active_source_label == "Live API"
         else "#185FA5" if active_source_label == "Uploaded Archive"
@@ -513,25 +410,8 @@ def render_analytics_page():
     for ok, msg in upload_messages:
         (st.success if ok else st.error)(msg)
 
-    # ---- Data coverage (ADDED) --------------------------------------------
-    # Answers "data for how long back?" concretely instead of leaving it
-    # implicit. The pull is a fixed COUNT of most-recent records per status
-    # (not a fixed calendar window), so the actual time span it covers
-    # shifts with order volume — showing the real min/max date found in
-    # what was actually loaded is the only honest way to answer that.
-    #
-    # BUG FIX (2026-07-12): in-flight delivery_date is a scheduled/target
-    # time (date_to_receive_shipment), not something that already
-    # happened. A genuinely still-in-flight order realistically can't have
-    # a target date from months ago — that's stale/bad data (e.g. an
-    # order that got stuck and never closed out), not a real 5-month-long
-    # delivery. A single such record was silently dragging this whole
-    # banner's "in-flight" range back to January. Fixed by excluding
-    # implausible target dates from the range shown here specifically
-    # (order counts elsewhere are NOT affected — this only changes what
-    # date range gets displayed/anchored on).
-    IN_FLIGHT_PLAUSIBLE_PAST_DAYS = 45   # a target pickup date older than this is treated as stale data, not a real long-running order
-    IN_FLIGHT_PLAUSIBLE_FUTURE_DAYS = 14  # scheduled further ahead than this is treated the same way
+    IN_FLIGHT_PLAUSIBLE_PAST_DAYS = 45
+    IN_FLIGHT_PLAUSIBLE_FUTURE_DAYS = 14
 
     def _plausible_in_flight_mask(dates: pd.Series) -> pd.Series:
         now = pd.Timestamp.now()
@@ -585,11 +465,6 @@ def render_analytics_page():
         with st.expander("Technical details"):
             st.code(detail)
 
-    # ---- Partial fetch failure (some statuses OK, some not) --------------
-    # This is different from load_error above: the page still has real data
-    # and renders normally, but a slice of it (e.g. every "delivered" order)
-    # may be silently missing — which is exactly what caused confusing swings
-    # between refreshes before. Never hide this.
     fetch_diag = getattr(df_all, "attrs", {}).get("fetch_diagnostics")
     if fetch_diag and fetch_diag.get("failed_statuses") and not load_error:
         failed = fetch_diag["failed_statuses"]
@@ -606,7 +481,6 @@ def render_analytics_page():
             st.write(f"❌ Failed: {', '.join(failed)}")
             st.code(fetch_diag["errors"])
 
-    # ---- Snapshot tools (Live API mode only) -------------------------
     if source == "api" and api_key and not df_all.empty and not load_error:
         snap_col1, snap_col2, snap_col3 = st.columns([1.6, 1.3, 1.3])
         with snap_col1:
@@ -616,10 +490,6 @@ def render_analytics_page():
                     f"Main data: {summary['added']} new, {summary['updated']} updated, "
                     f"{summary['total_in_archive']} total."
                 )
-                # Same click also archives the richer v2 (financial/risk) shape —
-                # this is what "the archive should save everything I fetch, not
-                # just v1" means in practice: one save action, both archives kept
-                # in sync, rather than two separate buttons someone can forget.
                 try:
                     df_v2_for_save = _cached_v2_load(api_key, start_date=admin_start_str, end_date=admin_end_str)
                     if not df_v2_for_save.empty:
@@ -653,12 +523,6 @@ def render_analytics_page():
                 disabled=df_v2_for_download.empty,
             )
 
-        # Always-visible ground truth about the archive file itself. If
-        # "778 new, 0 updated" repeats identically on every save, this
-        # panel is where that gets diagnosed: either the resolved path
-        # changes between loads, or last-modified doesn't reflect the save
-        # that was JUST clicked — both point to the file not surviving
-        # between requests (hosting/storage config), not a code bug.
         with st.expander("🔍 Archive file diagnostics"):
             info = get_archive_file_info(archive_path)
             st.write(f"**Resolved path:** `{info['abs_path']}`")
@@ -675,10 +539,6 @@ def render_analytics_page():
             else:
                 st.write("**File does not exist yet** — click 'Save this snapshot' once to create it.")
 
-        # Warns if too much time passed since the last save such that some
-        # shipments already scrolled out of the API's "most recent N"
-        # window before ever being archived — those are gone for good, so
-        # this needs to be visible *before* it happens again, not after.
         gap_info = detect_archive_gap(load_archive(archive_path), df_all)
         if gap_info["reason"] == "no_archive_yet":
             st.caption(
@@ -741,7 +601,6 @@ def render_analytics_page():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # ---- Filters ----------------------------------------------------------
     fcol1, fcol2, fcol3 = st.columns(3)
     with fcol1:
         area_options = sorted(df_all["area"].dropna().unique().tolist())
@@ -753,26 +612,6 @@ def render_analytics_page():
         granularity_label = st.selectbox("Group orders by", ["Daily", "Weekly", "Monthly"], index=1)
         granularity_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
 
-    # ---- Date range filter (ADDED) -----------------------------------------
-    # Filters by delivery_date (= date_to_receive_shipment). Only ever
-    # narrows down whatever was actually loaded above — it can't pull in
-    # data from further back than what's already in df_all. On "Live API"
-    # that's usually a few days at most (see the "Data actually covers"
-    # caption above); on "Uploaded Archive" it can be as wide as whatever
-    # has been saved over time. Picking "Last 30 days" doesn't guarantee a
-    # full month of DATA — only that anything older than 30 days is excluded.
-    #
-    # BUG FIX (2026-07-12): min/max used to come from ALL statuses,
-    # in-flight included. In-flight delivery_date is a scheduled/target
-    # time, not an "occurred" one, so a single stale target (e.g. an old
-    # in-flight shipment that was never marked delivered) silently dragged
-    # min_date back by months. That corrupted this block two ways at once:
-    # it suppressed the "data only goes back to X" clamp caption below
-    # (min_date looked artificially old, so the clamp condition never
-    # triggered), and it made preset windows for in-flight orders
-    # meaningless. Fixed by anchoring min/max to DATED_STATUSES
-    # (delivered/returned) only — see the filtering step further down for
-    # the matching fix on the actual row-filtering side.
     date_col = df_all.loc[
         df_all["status"].isin(DATED_STATUSES), "delivery_date"
     ].dropna() if "status" in df_all.columns else df_all["delivery_date"].dropna()
@@ -786,22 +625,6 @@ def render_analytics_page():
         )
     if not date_col.empty:
         min_date, max_date = date_col.min().date(), date_col.max().date()
-        # BUG FIX (2026-07-11): presets used to anchor "Last 24 hours" etc.
-        # to max_date (the latest value actually present in the data).
-        # For in-flight orders, delivery_date comes from
-        # date_to_receive_shipment — a PLANNED pickup time that can be
-        # scheduled for later today or tomorrow, not something that already
-        # happened. If even one in-flight order has a near-future target
-        # time, max_date gets pulled forward past "today", and "Last 24
-        # hours" ends up anchored to that future point instead of the real
-        # current moment — silently including a wide net of scheduled
-        # in-flight orders that a real "last 24 hours" shouldn't. This is
-        # why a manually-picked recent custom range could show FEWER
-        # orders than the "Last 24 hours" preset: the preset's anchor was
-        # inflated by future-scheduled dates, the custom pick wasn't.
-        # Fix: presets now anchor to the real wall-clock "now", same as
-        # anyone would expect "last 24 hours" to mean. Custom range is
-        # unaffected — it already used real picked calendar dates.
         today_real = pd.Timestamp.now().date()
         with dcol1:
             preset = st.selectbox(
@@ -812,38 +635,7 @@ def render_analytics_page():
             )
         if preset == "Custom range":
             with dcol2:
-                # BUG FIX (2026-07-16): passing value=(min_date, max_date)
-                # on every rerun — even with `key` set — resets the widget
-                # back to the full default range the instant a single date
-                # is clicked in the calendar popup (Streamlit sees an
-                # in-progress 1-tuple selection as incomplete and reseeds
-                # from `value` on the next rerun before the second date can
-                # be picked). Typing both dates into the text box commits a
-                # full 2-tuple in one action, so it never hit this. Seeding
-                # the default into session_state ONCE instead, and no longer
-                # passing `value=` on every call, lets calendar clicks
-                # persist across reruns like any other keyed widget.
-                # WIDENED BOUND (2026-07-17): st.date_input can resolve an
-                # internal default of today's real date before any date is
-                # picked. If max_date (latest delivery_date actually in the
-                # data) is behind today, that internal default lands outside
-                # max_value and raises. Widening ONLY the bound passed to
-                # this widget to include today keeps that default in-range —
-                # max_date itself is untouched everywhere else on the page
-                # (captions, presets, "data actually covers" display), so a
-                # picked range that reaches today simply returns whatever
-                # data exists (i.e. up through the last real shipment) with
-                # no separate fallback logic needed.
                 _widget_max_date = max(max_date, today_real)
-                # WIDENED LOWER BOUND (2026-07-19): min_date reflects only
-                # whatever is currently loaded — after picking a narrow
-                # custom range (e.g. 07/15-07/16), the next fetch only
-                # covers that span, so min_date collapsed to it too and the
-                # calendar got stuck unable to navigate to any earlier date
-                # (only a full page refresh, resetting to "All time",
-                # widened it back). Only future dates should ever be
-                # blocked; a fixed 2-year floor keeps navigation open
-                # regardless of how narrow the currently-loaded data is.
                 _widget_min_date = min(min_date, today_real - pd.Timedelta(days=730))
                 st.session_state.setdefault("wa_date_range_custom", (min_date, _widget_max_date))
                 _stored_custom = st.session_state["wa_date_range_custom"]
@@ -861,14 +653,11 @@ def render_analytics_page():
                         key="wa_date_range_custom",
                     )
                 except st.errors.StreamlitAPIException:
-                    # SAFETY NET (2026-07-17): if session_state still holds a
-                    # value the widget rejects for any reason, reset it to a
-                    # known-valid range instead of crashing the whole page.
                     st.session_state["wa_date_range_custom"] = (min_date, _widget_max_date)
                     date_range = (min_date, _widget_max_date)
         elif preset != "All time":
             days = {"Last 24 hours": 1, "Last 7 days": 7, "Last 30 days": 30}[preset]
-            window_end = min(max_date, today_real)  # never anchor past real "now"
+            window_end = min(max_date, today_real)
             naive_start = window_end - pd.Timedelta(days=days)
             window_start = max(min_date, naive_start)
             date_range = (window_start, window_end)
@@ -879,21 +668,6 @@ def render_analytics_page():
                     f"future pickup time. '{preset}' is anchored to today, not to those "
                     f"future dates, so it won't include them."
                 )
-            # BUG FIX (2026-07-12): this warning used to only check
-            # preset == "Last 30 days", so picking "Last 7 days" on data
-            # that only actually covers ~7 days showed the exact same
-            # numbers as "Last 30 days" with NO explanation why they
-            # matched — looked like the filter wasn't doing anything.
-            # Now checks whatever preset is selected, and covers two
-            # related cases:
-            #   1. Genuinely clamped: the preset asked for more history
-            #      than exists (e.g. "Last 30 days" but only 7 available).
-            #   2. Exact coincidental match: the preset's window happens
-            #      to line up exactly with all available data (e.g. "Last
-            #      7 days" when there's exactly 7 days total) — still
-            #      worth surfacing, because from the screen alone there's
-            #      no way to tell "this is deliberately 7 days of a much
-            #      longer history" from "this is literally all we have".
             if naive_start <= min_date:
                 actual_span = (window_end - min_date).days + 1
                 if naive_start < min_date:
@@ -914,34 +688,9 @@ def render_analytics_page():
     if selected_merchants:
         df = df[df["merchant_name"].isin(selected_merchants)]
 
-    # ---- Date range fix (2026-07-12) ---------------------------------------
-    # Previously this sliced EVERY status (in-flight included) by
-    # delivery_date. In-flight delivery_date is a scheduled/target time,
-    # not when the order actually happened — so "Last 24 hours" could show
-    # MORE orders than a specific past custom range simply because a batch
-    # of in-flight orders happened to be scheduled for today, while "Last
-    # 7 days" and "Last 30 days" could show identical totals because the
-    # date filter was silently a no-op for that whole slice of the data.
-    #
-    # Fix (superseded 2026-07-17, see FINDING 6 FIX below): the date range
-    # only ever filtered DATED_STATUSES (delivered/returned — real event
-    # timestamps), leaving in-flight orders always included in full.
-
     date_filter_active = bool(date_range and len(date_range) == 2)
     if date_filter_active:
         start, end = date_range
-        # FINDING 6 FIX (2026-07-17): the DATED_STATUSES carve-out above
-        # meant Cancelled — and every other non-delivered/returned status —
-        # never respected the selected date range at all, always showing in
-        # full regardless of range. That carve-out made sense for
-        # delivery_date (a SCHEDULED/target time that hasn't happened yet
-        # for in-flight orders) but not for "created_at" (the field
-        # filtered on since the Create Date default-filter fix above),
-        # which is always a real past event for every shipment regardless
-        # of its current status. The official dashboard's own
-        # start_date/end_date filtering isn't status-specific either
-        # (confirmed: no `status` param is sent). Filter now applies to
-        # every row, all statuses alike, matching that behavior.
         df = df[(df["created_at"].dt.date >= start) & (df["created_at"].dt.date <= end)]
 
     if df.empty:
@@ -949,16 +698,11 @@ def render_analytics_page():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # ---- KPI row ------------------------------------------------------
     kpis = summary_kpis(df)
     status_counts = status_breakdown(df)
     ma_for_breakdown = merchant_activity(df)
     watch_count = int((ma_for_breakdown["status"] == "Watch").sum()) if not ma_for_breakdown.empty else 0
 
-    # "577 = 200 delivered + 200 returned + 177 in-flight" — the actual
-    # composition behind the single Total orders number, built from
-    # whatever statuses are really present (never hardcoded), so this
-    # can't drift out of sync with the data.
     if not status_counts.empty:
         top_statuses = status_counts.head(4)
         orders_breakdown_txt = " + ".join(f"{int(r.orders):,} {r.status}" for r in top_statuses.itertuples())
@@ -967,8 +711,6 @@ def render_analytics_page():
     else:
         orders_breakdown_txt = ""
 
-    # Same idea for the money: gross order value split by delivered vs
-    # returned vs everything still in flight.
     if not df.empty and "status" in df.columns:
         delivered_val = df.loc[df["status"] == "delivered", "amount"].sum()
         returned_val = df.loc[df["status"] == "returned", "amount"].sum()
@@ -998,7 +740,6 @@ def render_analytics_page():
             unsafe_allow_html=True,
         )
 
-    # ---- Orders breakdown by status (ADDED) --------------------------------
     st.markdown('<div class="wa-section" id="orders-breakdown">', unsafe_allow_html=True)
     st.markdown(
         '<p class="wa-section-title">📦 Orders breakdown by status</p>'
@@ -1024,7 +765,6 @@ def render_analytics_page():
         st.info("No status data available for the current filter.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---- Orders over time -------------------------------------------------
     st.markdown('<div class="wa-section">', unsafe_allow_html=True)
     st.markdown(
         f'<p class="wa-section-title">Orders over time</p>'
@@ -1035,12 +775,11 @@ def render_analytics_page():
     st.bar_chart(ot.set_index("period")[["orders"]], y="orders", color=PURPLE, height=280)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---- Top areas + Courier leaderboard -----------------------------
     col_left, col_right = st.columns(2)
     with col_left:
         st.markdown('<div class="wa-section">', unsafe_allow_html=True)
         st.markdown('<p class="wa-section-title">Top areas by order volume</p>', unsafe_allow_html=True)
-        areas = top_areas(df, n=8)  # already sorted descending by the pipeline
+        areas = top_areas(df, n=8)
         st.bar_chart(areas.set_index("area")[["orders"]], y="orders", color=TEAL, height=280)
         excluded = areas.attrs.get("excluded_unknown_count", 0)
         if excluded:
@@ -1074,14 +813,13 @@ def render_analytics_page():
     with col_right:
         st.markdown('<div class="wa-section" id="courier-leaderboard">', unsafe_allow_html=True)
         st.markdown('<p class="wa-section-title">Courier leaderboard</p>', unsafe_allow_html=True)
-        couriers = courier_leaderboard(df, n=8)  # already sorted descending by the pipeline
+        couriers = courier_leaderboard(df, n=8)
         st.bar_chart(couriers.set_index("courier_name")[["orders"]], y="orders", color=PURPLE, height=280)
         excluded = couriers.attrs.get("excluded_unassigned_count", 0)
         if excluded:
             st.caption(f"{excluded:,} order(s) excluded — no courier assigned yet.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---- Least-busy areas + Least-active couriers (ADDED) -----------------
     least_col1, least_col2 = st.columns(2)
     with least_col1:
         least_areas = top_areas(df, n=8, ascending=True)
@@ -1119,7 +857,6 @@ def render_analytics_page():
         "Risk section below, which uses actual pickup/completion timestamps."
     )
 
-    # ---- All couriers, full ranking (ADDED 2026-07-19) ---------------------
     all_couriers = courier_leaderboard(df, n=df["courier_name"].nunique() if "courier_name" in df.columns else 0)
     if not all_couriers.empty:
         all_couriers_col, all_couriers_chart_col = st.columns(2)
@@ -1146,19 +883,6 @@ def render_analytics_page():
             st.bar_chart(all_couriers.set_index("courier_name")[["orders"]], y="orders", color=PURPLE, height=280)
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # NOTE: the old "2-hour promise tracking" section that used to live here
-    # has been removed (2026-07-10, per Ahmed's direction). It measured the
-    # gap between date_to_receive_shipment and date_to_deliver_shipment —
-    # both are TARGET/planned times from the live API, never the actual
-    # pickup or delivery moment, so the numbers it showed (e.g. "166 hours
-    # average") were not measuring anything real. The Risk section below
-    # (part of Financial Summary & Risk) replaces this correctly: it uses
-    # the actual pickup timestamp from each shipment's logs plus the real
-    # delivered_at / returned_at fields, and flags shipments that are
-    # overdue against their target — which is the metric Ahmed actually
-    # wants tracked.
-
-    # ---- Top merchants + Recent orders -----------------------------------
     col_a, col_b = st.columns([1, 1.3])
     with col_a:
         st.markdown('<div class="wa-section" id="merchant-tables">', unsafe_allow_html=True)
@@ -1191,7 +915,6 @@ def render_analytics_page():
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---- Least-active merchants + true zero-order merchants (ADDED) -------
     col_c, col_d = st.columns(2)
     with col_c:
         least_merch = merchant_leaderboard(df, n=8, ascending=True)
@@ -1226,7 +949,6 @@ def render_analytics_page():
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---- Merchant health --------------------------------------------------
     st.markdown('<div class="wa-section" id="merchant-health">', unsafe_allow_html=True)
     st.markdown(
         '<p class="wa-section-title">Merchant health — early warning</p>'
@@ -1270,13 +992,6 @@ def render_analytics_page():
         st.caption(f"{ma_excluded:,} order(s) excluded from this comparison — no merchant name on record.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # =========================================================================
-    # NEW SECTION — Financial Summary, real pickup-to-completion delivery
-    # time, and Risk/overdue alerts. Fully separate from everything above:
-    # sourced from analytics_pipeline_v2 (direct API + pagination + the
-    # confirmed financial formula), not from the v1 tables. If this section
-    # has a problem, it does not affect anything above it.
-    # =========================================================================
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="wa-section" id="financial-detail">', unsafe_allow_html=True)
     st.markdown(
@@ -1318,33 +1033,12 @@ def render_analytics_page():
                 v2_source_note = "Live API (load failed)"
         st.caption(f"📡 Financial/Risk data source: {v2_source_note}")
 
-        # Apply the SAME Area / Merchant filters selected above (fcol1/fcol2).
-        # Previously this section always showed the full, unfiltered dataset
-        # regardless of what was picked there — this is the fix for that.
-        # df_v2 uses the same "area" / "merchant_name" columns as df (both
-        # come from the same detect_area()/merchant.name logic), so this is
-        # a direct, safe filter — not a re-implementation.
         if not df_v2.empty:
             if selected_areas:
                 df_v2 = df_v2[df_v2["area"].isin(selected_areas)]
             if selected_merchants:
                 df_v2 = df_v2[df_v2["merchant_name"].isin(selected_merchants)]
 
-            # BUG FIX (2026-07-12): same category of issue as the main date
-            # filter above. This used to slice ALL of df_v2 by created_at —
-            # including in-flight/overdue rows feeding the Risk section
-            # further down (at_risk_shipments, risk_by_courier,
-            # overdue_age_buckets, overdue_by_area). "How many shipments
-            # are overdue RIGHT NOW" is a live/current question — an order
-            # created 5 days ago that's still overdue today doesn't stop
-            # being overdue just because "Last 24 hours" is selected up
-            # top. Filtering it out there made the whole Risk section
-            # silently under-report (or empty out) whenever any date
-            # preset other than "All time" was active.
-            # Fix: date range now only ever slices PRIMARY_STATUSES
-            # (delivered/returned — real revenue events with a genuine
-            # created_at). Risk/overdue rows are always included in full,
-            # same as the in-flight fix above.
             v2_is_primary = df_v2["status"].isin(PRIMARY_STATUSES) if "status" in df_v2.columns else pd.Series(True, index=df_v2.index)
             df_v2_dated = df_v2[v2_is_primary]
             df_v2_risk = df_v2[~v2_is_primary]
@@ -1353,14 +1047,6 @@ def render_analytics_page():
             v2_min_date = v2_full_dated_dates.min().date() if not v2_full_dated_dates.empty else None
             v2_max_date = v2_full_dated_dates.max().date() if not v2_full_dated_dates.empty else None
 
-            # FINDING 3 FIX (2026-07-17): removed the created_at re-filter that
-            # used to run here. df_v2_dated already reflects the server-side
-            # date filter from the shared fetch (same as the main section —
-            # see _cached_admin_shipments), so re-filtering by created_at was
-            # applying a second, different date field on top of that, which is
-            # exactly why this section's counts didn't match the main section
-            # for the identical picked range. v2_date_filter_active is still
-            # computed — used below only for informational captions.
             v2_date_filter_active = bool(date_range and len(date_range) == 2 and "created_at" in df_v2_dated.columns)
 
             df_v2 = pd.concat([df_v2_dated, df_v2_risk], ignore_index=True) if not df_v2_risk.empty else df_v2_dated.copy()
@@ -1394,23 +1080,11 @@ def render_analytics_page():
         else:
             if "created_at" in df_v2_dated.columns and df_v2_dated["created_at"].notna().any():
                 pulled_from = "the API" if not v2_from_archive else "the saved archive"
-                # FIX (2026-07-19): this used to describe an older fetch that
-                # pulled a fixed 200 most-recent orders per status regardless
-                # of date (pre-2026-07-15 admin-API migration). It now shares
-                # the same date-filtered fetch as the main section above, so
-                # it DOES respect the selected calendar range — the wording
-                # was leftover from that old behavior and no longer matched
-                # reality.
                 st.caption(
                     f"📅 Covers orders created {df_v2_dated['created_at'].min():%d %b} → "
                     f"{df_v2_dated['created_at'].max():%d %b} — every delivered + returned order "
                     f"in the selected date range, pulled from {pulled_from}."
                 )
-            # Clamp warning — same idea as the main section above: tell the
-            # user explicitly when the selected preset asked for more
-            # history than what's actually loaded, instead of silently
-            # showing a smaller range with no explanation (which is what
-            # made "Last 7 days" == "Last 30 days" look like a bug earlier).
             if v2_date_filter_active and v2_min_date and v2_max_date:
                 naive_start = date_range[0]
                 if naive_start < v2_min_date:
@@ -1432,7 +1106,6 @@ def render_analytics_page():
                     "regardless of the date range — risk is a live snapshot, not a historical count."
                 )
 
-            # --- Revenue ---------------------------------------------------
             rev = revenue_summary(df_v2)
             rc1, rc2, rc3, rc4, rc5 = st.columns(5)
             rc1.metric("Weevo revenue (delivered + returned)", f"{rev['total_weevo_revenue']:,.0f} EGP")
@@ -1445,7 +1118,6 @@ def render_analytics_page():
                 "payments) — Weevo's actual take per shipment, not the customer's order value."
             )
 
-            # --- Deeper financial breakdown (ADDED) -------------------------
             fin = financial_breakdown(df_v2)
             d, r = fin["delivered"], fin["returned"]
             st.markdown("<br>", unsafe_allow_html=True)
@@ -1494,7 +1166,6 @@ def render_analytics_page():
                     )
                 st.info(f"💡 {insight}")
 
-            # --- Delivery time (pickup -> completion) -----------------------
             st.markdown("<br>", unsafe_allow_html=True)
             dts = v2_delivery_time_summary(df_v2)
             if dts["sample_size"] > 0:
@@ -1507,25 +1178,12 @@ def render_analytics_page():
                     "— not from order creation time."
                 )
             else:
-                # NEW (2026-07-19): the pickup-based metric above can never
-                # populate (Admin API has no logs array, so no real actual-
-                # pickup timestamp — see delivery_time_summary's docstring).
-                # Replaced the dead message with a real analysis based on
-                # created_at -> delivered_date_at/returned_date_at instead:
-                # both are fixed, real event timestamps the API actually
-                # returns. Deliberately NOT using date_to_receive_shipment /
-                # date_to_deliver_shipment — those are dispatcher-editable
-                # targets, not a fixed record of what actually happened.
                 cts = creation_to_completion_summary(df_v2)
                 if cts["sample_size"] > 0:
                     st.markdown(
                         '<p class="wa-section-title" style="font-size:14px;">Order lifecycle time (creation → completion)</p>',
                         unsafe_allow_html=True,
                     )
-                    # SPLIT (2026-07-19): delivered and returned kept separate
-                    # instead of one blended average — a returned shipment went
-                    # out AND came back, so lumping it in with straightforward
-                    # deliveries hid that it's a naturally different duration.
                     cts_split = creation_to_completion_summary_by_status(df_v2)
                     csd, csr = cts_split["delivered"], cts_split["returned"]
                     lt_col1, lt_col2 = st.columns(2)
@@ -1572,15 +1230,6 @@ def render_analytics_page():
                 else:
                     st.caption("No shipments with both a creation and completion timestamp yet.")
 
-            # --- Courier shift risk -----------------------------------------
-            # Replaces the old target_deliver_at-based overdue view entirely
-            # (see analytics_pipeline_v2.courier_shift_risk docstring for why:
-            # target_deliver_at is dispatcher-editable, so a flag built on it
-            # — even as a % rather than a hard cutoff — could be pushed out of
-            # "risk" just by editing the target). This section only trusts
-            # created_at/delivered_at/returned_at/courier_id/status, none of
-            # which can be edited after the fact, compared against the fixed
-            # 5 PM–11 PM shift clock.
             st.markdown("<br>", unsafe_allow_html=True)
             shift = get_shift_progress()
             if not shift["active"] and shift["now"] < shift["shift_start"]:
@@ -1589,18 +1238,6 @@ def render_analytics_page():
                     f"{shift['shift_start'].strftime('%-I:%M %p')}–{shift['shift_end'].strftime('%-I:%M %p')}."
                 )
             else:
-                # BUG FIX (2026-07-20): df_v2 above is bounded by the
-                # top-level Date range picker — e.g. a Custom range not
-                # reaching today would leave this section with zero data
-                # for "today", even though the shift clock says it's
-                # running right now. This is a live daily-ops check, not a
-                # historical report, so it now always pulls an independent
-                # last-2-days window (today + yesterday, the extra day as a
-                # safety margin for any small server/client clock skew
-                # around midnight) — regardless of the Date range picked
-                # above. Same pattern as "Open shipments not yet resolved".
-                # Archive source has no date-range concept (a saved
-                # snapshot is already everything in it), reused as-is there.
                 if v2_from_archive:
                     cs_source = df_v2
                 else:
@@ -1725,25 +1362,6 @@ def render_analytics_page():
                         "every courier."
                     )
 
-            # --- Open shipments not yet resolved (ADDED 2026-07-19) ---------
-            # Deliberately separate from Courier shift risk above: an old
-            # open shipment isn't that day's shift falling behind, and
-            # folding it into "remaining" both skewed a courier's today-only
-            # risk score with a date it has nothing to do with, and buried
-            # the real issue inside a metric that isn't about it. See
-            # stale_open_shipments() docstring for why this can only say
-            # "created X days ago, still open" — not "stuck" or "forgotten"
-            # (no "last status update" timestamp exists in this data).
-            #
-            # BUG FIX (2026-07-20): df_v2 above is bounded by the top-level
-            # Date range picker — with a narrow preset like "Last 24 hours",
-            # the server-side fetch itself excludes anything older than
-            # ~a day, so this section could never actually see a 2+ day
-            # old stale shipment, no matter how many exist. Always pulls
-            # "All time" independently instead, regardless of the Date
-            # range picked above — same Area/Merchant filters still apply.
-            # Archive source has no date-range concept (a saved snapshot is
-            # already everything in it), so reused as-is there.
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown(
                 '<p class="wa-section-title" style="font-size:13px;">Open shipments not yet resolved</p>'
@@ -1787,26 +1405,6 @@ def render_analytics_page():
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
-
-# ---------------------------------------------------------------------------
-# INTEGRATION NOTES — copy-paste additions for dashboard.py (do not edit
-# any existing line, only add):
-#
-# 1. Near the top, with the other imports:
-#      from streamlit_ui.analytics_page import render_analytics_page
-#
-# 2. In the sidebar selectbox options list, add one more string:
-#      [..., "🔧 Admin Tools", "📈 Data Analytics"]
-#
-# 3. After the final existing elif block (the one for "🔧 Admin Tools"),
-#    add:
-#      elif page == "📈 Data Analytics":
-#          render_analytics_page()
-#
-# No new pip packages required — this file only uses st.bar_chart /
-# st.dataframe / st.markdown, all bundled with streamlit==1.29.0
-# already pinned in requirements.txt.
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     st.set_page_config(page_title="Analytics", layout="wide")
     render_analytics_page()
