@@ -84,6 +84,8 @@ from app.services.analytics_pipeline_v2 import (
     get_shift_progress,
     courier_shift_risk,
     courier_shift_risk_summary,
+    stale_open_shipments,
+    STALE_OPEN_SHIPMENT_DAYS,
     fetch_merchants,
     PRIMARY_STATUSES,
     DEFAULT_V2_ARCHIVE_PATH,
@@ -1601,10 +1603,11 @@ def render_analytics_page():
                 )
                 if v2_date_filter_active:
                     st.caption(
-                        "ℹ️ 'Closed today' counts only shipments *created* within the Date range selected "
-                        "above — a shipment created before that range but delivered/returned today won't be "
-                        "counted here. 'Remaining' is unaffected (always the current live count). Switch the "
-                        "Date range to 'All time' for the most accurate courier-risk picture."
+                        "ℹ️ 'Closed today' and 'Remaining' both only count shipments *created* today — a "
+                        "shipment created before today (whether it's still open or was delivered/returned "
+                        "today) won't appear in either column here. See 'Open shipments not yet resolved' "
+                        "below for older open shipments. Switch the Date range to 'All time' to make sure "
+                        "today's own shipments aren't excluded by the range picked above."
                     )
 
                 if cs_risk.empty:
@@ -1693,10 +1696,42 @@ def render_analytics_page():
                     st.markdown(table_html, unsafe_allow_html=True)
                     st.caption(
                         "'Closed today' = delivered or returned today (delivered_date_at / returned_date_at). "
-                        "'Remaining' = currently assigned to this courier and not yet delivered/returned/cancelled. "
-                        "'Progress' compares this courier's own closed-vs-remaining share against how much of "
-                        "the 5 PM–11 PM shift has elapsed — the same expected % for every courier."
+                        "'Remaining' = currently assigned to this courier, created today, and not yet "
+                        "delivered/returned/cancelled. 'Progress' compares this courier's own closed-vs-remaining "
+                        "share against how much of the 5 PM–11 PM shift has elapsed — the same expected % for "
+                        "every courier."
                     )
+
+            # --- Open shipments not yet resolved (ADDED 2026-07-19) ---------
+            # Deliberately separate from Courier shift risk above: an old
+            # open shipment isn't that day's shift falling behind, and
+            # folding it into "remaining" both skewed a courier's today-only
+            # risk score with a date it has nothing to do with, and buried
+            # the real issue inside a metric that isn't about it. See
+            # stale_open_shipments() docstring for why this can only say
+            # "created X days ago, still open" — not "stuck" or "forgotten"
+            # (no "last status update" timestamp exists in this data).
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown(
+                '<p class="wa-section-title" style="font-size:13px;">Open shipments not yet resolved</p>'
+                f'<p class="wa-section-sub">Shipments created {STALE_OPEN_SHIPMENT_DAYS}+ days ago that are '
+                'still not delivered/returned/cancelled — separate from shift risk above, since these aren\'t '
+                'necessarily today\'s shift falling behind.</p>',
+                unsafe_allow_html=True,
+            )
+            stale = stale_open_shipments(df_v2)
+            if stale.empty:
+                st.success(f"✅ No shipments open {STALE_OPEN_SHIPMENT_DAYS}+ days.")
+            else:
+                st.dataframe(
+                    stale.rename(columns={
+                        "shipment_id": "Shipment ID", "courier_name": "Courier",
+                        "merchant_name": "Merchant", "status": "Status",
+                        "created_at": "Created", "days_open": "Days open",
+                    }),
+                    use_container_width=True, hide_index=True, height=280,
+                    column_config={"Days open": st.column_config.NumberColumn(format="%.1f")},
+                )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
