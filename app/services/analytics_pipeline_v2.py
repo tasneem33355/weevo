@@ -350,6 +350,15 @@ def build_v2_dataframe(raw_records: list, fetch_meta: Optional[dict] = None) -> 
     built from identical underlying shipments."""
     parsed = [parse_shipment(r) for r in raw_records]
     df = pd.DataFrame(parsed)
+    # FIX (2026-07-19): without this, a column that's entirely None for the
+    # current fetch (e.g. zero "returned" orders in a narrow date range like
+    # "Last 24 hours") gets inferred as dtype=object instead of datetime64,
+    # which breaks datetime subtraction downstream (creation_to_completion_
+    # summary_by_status and similar). Same coercion the archive-loading path
+    # already does (_empty_v2_archive_df/load_v2_archive) — just missing here.
+    for _col in _V2_DATETIME_COLS:
+        if _col in df.columns:
+            df[_col] = pd.to_datetime(df[_col], errors="coerce")
     if not df.empty:
         df = enrich_areas_with_cache(df)  # free: reuses anything classified via v1 or the AI button
     df.attrs["fetch_diagnostics"] = _v2_fetch_diagnostics_from_meta(fetch_meta)
@@ -538,6 +547,167 @@ def risk_by_courier(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
         .sort_values("overdue_orders", ascending=False)
     )
+
+
+# ---------------------------------------------------------------------------
+# Courier shift risk (replaces the old target_deliver_at-based "overdue"
+# view). Rationale, confirmed with the business (2026-07-19):
+#   - target_deliver_at (date_to_deliver_shipment) is a dispatcher-editable
+#     field. A binary "now > target_deliver_at" flag — or even a % of that
+#     same window — can be pushed out of "risk" just by editing the target,
+#     so it doesn't reliably reflect whether a courier is actually behind.
+#   - Couriers work a single fixed shift, 5:00 PM to 11:00 PM (6 hours),
+#     the same for everyone, every day. That's a business fact, not a
+#     column in the data, so it's hardcoded here rather than read from
+#     any field.
+#   - The only two things this section trusts are how many shipments a
+#     courier has fully closed out today (delivered_at / returned_at,
+#     both real fixed timestamps — see module docstring) and how many
+#     non-terminal shipments are still assigned to them right now
+#     (status, courier_id). Neither can be edited after the fact the way
+#     target_deliver_at can.
+#   - Risk = comparing "% of the shift elapsed" against "% of today's
+#     workload actually closed out" for that courier. A courier who's
+#     closed proportionally fewer orders than the shift clock would
+#     suggest is falling behind; how far behind sets the risk level.
+# ---------------------------------------------------------------------------
+SHIFT_START_HOUR = 17   # 5:00 PM
+SHIFT_END_HOUR = 23     # 11:00 PM (6-hour shift)
+
+RISK_LEVEL_ORDER = {"🔴 Overdue": 0, "🔴 At risk": 1, "🟡 Watch": 2, "🟢 Healthy": 3}
+
+
+def get_shift_progress(now: "pd.Timestamp | None" = None) -> dict:
+    """Where 'right now' sits inside today's fixed 5 PM–11 PM shift.
+    `active` is False outside that window — the page uses this to decide
+    whether to show the courier-risk section at all, rather than showing
+    a misleading 0%/100% reading for a shift that isn't running."""
+    if now is None:
+        now = pd.Timestamp.now()
+    shift_start = now.normalize() + pd.Timedelta(hours=SHIFT_START_HOUR)
+    shift_end = now.normalize() + pd.Timedelta(hours=SHIFT_END_HOUR)
+    shift_length_seconds = (shift_end - shift_start).total_seconds()
+    elapsed_seconds = max(0.0, min((now - shift_start).total_seconds(), shift_length_seconds))
+    elapsed_pct = round(elapsed_seconds / shift_length_seconds * 100, 1) if shift_length_seconds > 0 else 0.0
+    return {
+        "active": shift_start <= now <= shift_end,
+        "now": now,
+        "shift_start": shift_start,
+        "shift_end": shift_end,
+        "elapsed_pct": elapsed_pct,
+        "elapsed_hours": round(elapsed_seconds / 3600, 2),
+        "shift_length_hours": round(shift_length_seconds / 3600, 2),
+    }
+
+
+def courier_shift_risk(df: pd.DataFrame, now: "pd.Timestamp | None" = None) -> pd.DataFrame:
+    """One row per courier who has any activity today (something closed
+    out today, or something still open right now) — couriers with
+    neither are left out entirely, there's nothing to show for them.
+
+    completed_today = delivered_at.date() == today OR returned_at.date()
+    == today, for that courier (both count as "closed out", whichever
+    way the shipment resolved).
+    remaining = currently assigned to that courier, status not in
+    TERMINAL_STATUSES — same non-terminal definition used everywhere
+    else in this module.
+    actual_progress_pct = completed_today / (completed_today + remaining)
+    expected_progress_pct = % of the shift elapsed (same number for
+    every courier, from get_shift_progress()).
+    gap_pct = expected - actual. Positive means behind pace.
+    risk_level: 🔴 Overdue if the shift has ended and the courier still
+    has remaining orders; otherwise banded by gap_pct."""
+    progress = get_shift_progress(now)
+    empty = pd.DataFrame(columns=[
+        "courier_name", "delivered_today", "returned_today", "completed_today",
+        "remaining", "total_handled_today", "actual_progress_pct",
+        "expected_progress_pct", "gap_pct", "risk_level",
+    ])
+    if not progress["active"] and progress["now"] < progress["shift_start"]:
+        # Before today's shift has started, "remaining" would just be
+        # leftover in-flight shipments from a previous shift/day with no
+        # meaningful expected_progress_pct to compare against.
+        return empty
+
+    assigned = df[df["courier_id"].notna()].copy()
+    if assigned.empty:
+        return empty
+
+    today = progress["now"].normalize()
+    remaining_mask = ~assigned["status"].isin(TERMINAL_STATUSES)
+    delivered_today_mask = (
+        (assigned["status"] == "delivered")
+        & assigned["delivered_at"].notna()
+        & (assigned["delivered_at"].dt.normalize() == today)
+    )
+    returned_today_mask = (
+        (assigned["status"] == "returned")
+        & assigned["returned_at"].notna()
+        & (assigned["returned_at"].dt.normalize() == today)
+    )
+
+    assigned["_remaining"] = remaining_mask
+    assigned["_delivered_today"] = delivered_today_mask
+    assigned["_returned_today"] = returned_today_mask
+
+    grouped = (
+        assigned.groupby("courier_name")
+        .agg(
+            delivered_today=("_delivered_today", "sum"),
+            returned_today=("_returned_today", "sum"),
+            remaining=("_remaining", "sum"),
+        )
+        .reset_index()
+    )
+    grouped["completed_today"] = grouped["delivered_today"] + grouped["returned_today"]
+    grouped = grouped[(grouped["completed_today"] > 0) | (grouped["remaining"] > 0)].copy()
+    if grouped.empty:
+        return empty
+
+    grouped["total_handled_today"] = grouped["completed_today"] + grouped["remaining"]
+    grouped["actual_progress_pct"] = (
+        grouped["completed_today"] / grouped["total_handled_today"] * 100
+    ).round(1)
+    grouped["expected_progress_pct"] = progress["elapsed_pct"]
+    grouped["gap_pct"] = (grouped["expected_progress_pct"] - grouped["actual_progress_pct"]).round(1)
+
+    shift_over = progress["now"] >= progress["shift_end"]
+
+    def _risk(row) -> str:
+        if shift_over and row["remaining"] > 0:
+            return "🔴 Overdue"
+        if row["gap_pct"] <= 10:
+            return "🟢 Healthy"
+        if row["gap_pct"] <= 25:
+            return "🟡 Watch"
+        return "🔴 At risk"
+
+    grouped["risk_level"] = grouped.apply(_risk, axis=1)
+    grouped["_sort"] = grouped["risk_level"].map(RISK_LEVEL_ORDER)
+    grouped = (
+        grouped.sort_values(["_sort", "remaining"], ascending=[True, False])
+        .drop(columns="_sort")
+        .reset_index(drop=True)
+    )
+    return grouped[[
+        "courier_name", "delivered_today", "returned_today", "completed_today",
+        "remaining", "total_handled_today", "actual_progress_pct",
+        "expected_progress_pct", "gap_pct", "risk_level",
+    ]]
+
+
+def courier_shift_risk_summary(risk_df: pd.DataFrame) -> dict:
+    """Counts feeding the small KPI row above the courier-risk table."""
+    if risk_df.empty:
+        return {"healthy": 0, "watch": 0, "at_risk": 0, "overdue": 0, "total_remaining": 0}
+    counts = risk_df["risk_level"].value_counts()
+    return {
+        "healthy": int(counts.get("🟢 Healthy", 0)),
+        "watch": int(counts.get("🟡 Watch", 0)),
+        "at_risk": int(counts.get("🔴 At risk", 0)),
+        "overdue": int(counts.get("🔴 Overdue", 0)),
+        "total_remaining": int(risk_df["remaining"].sum()),
+    }
 
 
 def financial_breakdown(df: pd.DataFrame) -> dict:
