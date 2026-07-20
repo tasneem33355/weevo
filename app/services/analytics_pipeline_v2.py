@@ -60,52 +60,26 @@ from datetime import datetime
 from typing import Optional
 
 import pandas as pd
-import httpx  # matches app/services/external_api.py — requests is not in requirements.txt
+import httpx
 
 from app.services.analytics_pipeline import (
     detect_area,
     enrich_areas_with_cache,
-    fetch_admin_shipments,  # single shared admin-API fetch (2026-07-15 migration) — see load_shipments_v2 below
-    _get_admin_bearer_token,  # shared Bearer-token cache/login (2026-07-15 migration) — see _get() below
+    fetch_admin_shipments,
+    _get_admin_bearer_token,
 )
 
 WEEVO_API_BASE_URL = os.getenv("WEEVO_API_BASE_URL", "https://eg.api.weevoapp.com")
 
-# Ahmed's stated priority: Delivered and Returned are the two states that
-# matter most for the finance/ops analysis ("لو أدانا عشرة سلمنا تمانية
-# ورجعنا اتنين"). These get the full page budget below.
 PRIMARY_STATUSES = ["delivered", "returned"]
 
-# Concurrency: NONE. Live evidence (2026-07-11): capping concurrent status
-# requests at 3 still correlated with every single status failing at once
-# (502 Bad Gateway — the backend itself rejecting/erroring, a step worse
-# than the 504 timeouts seen before that change). All requests below are
-# fired one at a time, with a short pause between each, so this pipeline
-# never has more than one request in flight against their backend.
-INTER_REQUEST_DELAY = 0.35   # seconds between every individual HTTP call —
-                              # still used by fetch_reference_list() below
-                              # (captains/merchants, unchanged) and shared
-                              # with the admin shipments fetch imported from
-                              # analytics_pipeline (its own pacing/time-budget
-                              # constants live there now, see fetch_admin_shipments).
+INTER_REQUEST_DELAY = 0.35
 
-# Terminal states — a shipment in one of these is done, one way or another,
-# and should never show up in the "at risk / overdue" view.
 TERMINAL_STATUSES = {"delivered", "returned", "cancelled", "bulk-shipment-closed", "bulk-shipment-cancelled"}
 
-
-# ---------------------------------------------------------------------------
-# Low-level HTTP — same retry pattern as the v1 pipeline (502/503/504 and
-# client-side timeouts get one retry at double the timeout before the
-# failure is surfaced rather than masked).
-# ---------------------------------------------------------------------------
 GATEWAY_ERROR_CODES = {502, 503, 504}
-REQUEST_TIMEOUT = 20   # seconds. A 502/503/504 means the gateway on THEIR
-                        # side already gave up — a longer client timeout
-                        # doesn't fix that, so retries below use a short
-                        # pause instead of a bigger timeout.
-MAX_RETRIES = 1         # 1 retry (2 attempts total) per request
-
+REQUEST_TIMEOUT = 20
+MAX_RETRIES = 1
 
 def _get(url: str, api_key: str, params: dict, base_url: str = WEEVO_API_BASE_URL,
           timeout: int = REQUEST_TIMEOUT) -> httpx.Response:
@@ -140,18 +114,6 @@ def _get(url: str, api_key: str, params: dict, base_url: str = WEEVO_API_BASE_UR
                 continue
             raise
 
-
-# fetch_shipments_page / fetch_shipments_by_status_multipage / fetch_all_statuses
-# (the old per-status AI-agent shipment fetch) are superseded by
-# fetch_admin_shipments(), imported from analytics_pipeline — see
-# load_shipments_v2() below. fetch_reference_list()/fetch_captains()/
-# fetch_merchants() below are ALSO now migrated (2026-07-15) onto the same
-# admin-5678vna9k6 Admin Dashboard backend and the same shared Bearer-token
-# auth as shipments — confirmed against real captured merchants/couriers
-# responses, see Merchant.docx.
-
-
-
 def fetch_reference_list(endpoint: str, api_key: str, base_url: str = WEEVO_API_BASE_URL,
                           limit: int = 100, max_pages: int = 5) -> list:
     """Generic paginated fetch for /merchants and /couriers on the Admin
@@ -177,7 +139,6 @@ def fetch_reference_list(endpoint: str, api_key: str, base_url: str = WEEVO_API_
         time.sleep(INTER_REQUEST_DELAY)
     return all_records
 
-
 def fetch_captains(api_key: str, base_url: str = WEEVO_API_BASE_URL) -> pd.DataFrame:
     """Couriers roster (2026-07-15 migration: real endpoint is `/couriers`
     on the Admin Dashboard backend — kept the name fetch_captains() since
@@ -185,17 +146,10 @@ def fetch_captains(api_key: str, base_url: str = WEEVO_API_BASE_URL) -> pd.DataF
     records = fetch_reference_list("couriers", api_key, base_url)
     return pd.DataFrame(records)
 
-
 def fetch_merchants(api_key: str, base_url: str = WEEVO_API_BASE_URL) -> pd.DataFrame:
     records = fetch_reference_list("merchants", api_key, base_url)
     return pd.DataFrame(records)
 
-
-# ---------------------------------------------------------------------------
-# Parsing — raw API record -> flat row with every derived field the
-# dashboard needs. This is the one place all the field-mapping knowledge
-# from the raw JSON investigation lives.
-# ---------------------------------------------------------------------------
 def _parse_dt(value: Optional[str]):
     """Parses any of the date formats seen in real shipment records.
 
@@ -219,7 +173,6 @@ def _parse_dt(value: Optional[str]):
     except (ValueError, TypeError):
         return None
 
-
 def _extract_actual_pickup_at(logs: list):
     """Last 'picked_up_by_captain' log entry (a shipment can have more
     than one if it was reassigned mid-flight; the last one before
@@ -229,7 +182,6 @@ def _extract_actual_pickup_at(logs: list):
         return None
     latest = max(pickup_logs, key=lambda l: l.get("created_at") or "")
     return _parse_dt(latest.get("created_at"))
-
 
 def parse_shipment(raw: dict) -> dict:
     status = raw.get("status", "unknown")
@@ -241,11 +193,6 @@ def parse_shipment(raw: dict) -> dict:
     merchant = raw.get("merchant") or {}
     courier = raw.get("courier") or {}
 
-    # Admin Dashboard API (2026-07-15 migration) has no `logs` array at all,
-    # so this always evaluates to None now — confirmed with the business:
-    # leave it null rather than approximate with a different timestamp, so
-    # delivery_hours below is also always None. No code change needed here;
-    # raw.get("logs") -> None -> (logs or []) -> [] handles it already.
     pickup_actual_at = _extract_actual_pickup_at(raw.get("logs"))
     delivered_at = _parse_dt(raw.get("delivered_date_at"))
     returned_at = _parse_dt(raw.get("returned_date_at"))
@@ -254,7 +201,7 @@ def parse_shipment(raw: dict) -> dict:
     delivery_hours = None
     if pickup_actual_at is not None and completed_at is not None:
         delta_hours = (completed_at - pickup_actual_at).total_seconds() / 3600
-        if delta_hours >= 0:  # guards against bad/out-of-order data
+        if delta_hours >= 0:
             delivery_hours = round(delta_hours, 2)
 
     target_deliver_at = _parse_dt(raw.get("date_to_deliver_shipment"))
@@ -265,10 +212,6 @@ def parse_shipment(raw: dict) -> dict:
         and target_deliver_at < now
     )
 
-    # Weevo's own revenue on this shipment (confirmed formula, see module
-    # docstring). merchant_payout only makes sense for cod (amount > 0);
-    # for online payments the customer already paid the merchant directly,
-    # so there's no "amount collected to hand back" — left as None.
     weevo_revenue = round(agreed_shipping_cost + transfer_fee, 2)
     merchant_payout = round(amount - agreed_shipping_cost - transfer_fee, 2) if amount > 0 else None
 
@@ -302,7 +245,6 @@ def parse_shipment(raw: dict) -> dict:
         "delivered_code": raw.get("handover_code_courier_to_customer"),
         "returned_code": raw.get("handover_code_courier_to_merchant"),
     }
-
 
 def _v2_fetch_diagnostics_from_meta(fetch_meta: Optional[dict]) -> dict:
     """Adapts analytics_pipeline.fetch_admin_shipments()'s generic fetch_meta
@@ -338,7 +280,6 @@ def _v2_fetch_diagnostics_from_meta(fetch_meta: Optional[dict]) -> dict:
         "fetched_at": fetch_meta["fetched_at"],
     }
 
-
 def build_v2_dataframe(raw_records: list, fetch_meta: Optional[dict] = None) -> pd.DataFrame:
     """Pure mapping: raw admin-API shipment dicts -> the parse_shipment()
     shape this pipeline has always produced. No HTTP in here — split out
@@ -350,20 +291,13 @@ def build_v2_dataframe(raw_records: list, fetch_meta: Optional[dict] = None) -> 
     built from identical underlying shipments."""
     parsed = [parse_shipment(r) for r in raw_records]
     df = pd.DataFrame(parsed)
-    # FIX (2026-07-19): without this, a column that's entirely None for the
-    # current fetch (e.g. zero "returned" orders in a narrow date range like
-    # "Last 24 hours") gets inferred as dtype=object instead of datetime64,
-    # which breaks datetime subtraction downstream (creation_to_completion_
-    # summary_by_status and similar). Same coercion the archive-loading path
-    # already does (_empty_v2_archive_df/load_v2_archive) — just missing here.
     for _col in _V2_DATETIME_COLS:
         if _col in df.columns:
             df[_col] = pd.to_datetime(df[_col], errors="coerce")
     if not df.empty:
-        df = enrich_areas_with_cache(df)  # free: reuses anything classified via v1 or the AI button
+        df = enrich_areas_with_cache(df)
     df.attrs["fetch_diagnostics"] = _v2_fetch_diagnostics_from_meta(fetch_meta)
     return df
-
 
 def load_shipments_v2(api_key: str, base_url: str = WEEVO_API_BASE_URL,
                        start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
@@ -388,10 +322,6 @@ def load_shipments_v2(api_key: str, base_url: str = WEEVO_API_BASE_URL,
     )
     return build_v2_dataframe(raw_records, fetch_meta=fetch_meta)
 
-
-# ---------------------------------------------------------------------------
-# Aggregations specific to what Ahmed asked for
-# ---------------------------------------------------------------------------
 def revenue_summary(df: pd.DataFrame) -> dict:
     """Weevo's actual take, not gross order value — delivered + returned
     only (in-flight orders haven't generated final revenue yet)."""
@@ -412,7 +342,6 @@ def revenue_summary(df: pd.DataFrame) -> dict:
         "delivered_rate_pct": round(len(delivered) / len(completed) * 100, 1) if len(completed) else 0.0,
     }
 
-
 def delivery_time_summary(df: pd.DataFrame) -> dict:
     """Actual pickup-to-completion time, delivered + returned combined —
     this replaces the old 'two hours from order creation' framing per
@@ -426,18 +355,6 @@ def delivery_time_summary(df: pd.DataFrame) -> dict:
         "sample_size": int(len(valid)),
     }
 
-
-# ---------------------------------------------------------------------------
-# Creation-to-completion time analysis (ADDED 2026-07-19)
-# ---------------------------------------------------------------------------
-# delivery_time_summary() above is permanently empty — the Admin Dashboard
-# API has no `logs` array, so there is no real actual-pickup timestamp to
-# measure from (see parse_shipment's comment). These functions measure from
-# created_at instead, which — like delivered_date_at/returned_date_at — is a
-# real, fixed event timestamp the API actually returns. They deliberately
-# do NOT use date_to_receive_shipment / date_to_deliver_shipment: those are
-# target/expected times a dispatcher can reassign, not a fixed record of
-# what actually happened, so they're not a reliable performance measure.
 def _lifecycle_hours(df: pd.DataFrame) -> pd.Series:
     """created_at -> delivered_at/returned_at, in hours. Only rows with a
     valid non-negative duration are kept (guards against bad/out-of-order
@@ -446,7 +363,6 @@ def _lifecycle_hours(df: pd.DataFrame) -> pd.Series:
     completed_at = completed["delivered_at"].fillna(completed["returned_at"])
     hours = (completed_at - completed["created_at"]).dt.total_seconds() / 3600
     return hours[hours.notna() & (hours >= 0)]
-
 
 def creation_to_completion_summary(df: pd.DataFrame) -> dict:
     """Avg/median time from order creation to actual delivered/returned
@@ -459,7 +375,6 @@ def creation_to_completion_summary(df: pd.DataFrame) -> dict:
         "median_hours": round(valid.median(), 2),
         "sample_size": int(len(valid)),
     }
-
 
 def creation_to_completion_summary_by_status(df: pd.DataFrame) -> dict:
     """Same measure as creation_to_completion_summary(), but delivered and
@@ -483,7 +398,6 @@ def creation_to_completion_summary_by_status(df: pd.DataFrame) -> dict:
         "returned": _for("returned", "returned_at"),
     }
 
-
 def creation_to_completion_by_area(df: pd.DataFrame, n: int = 5, ascending: bool = False) -> pd.DataFrame:
     """Avg creation-to-completion time per delivery area (the `area` column,
     detected from delivering_street) — fastest areas first if ascending=True,
@@ -502,7 +416,6 @@ def creation_to_completion_by_area(df: pd.DataFrame, n: int = 5, ascending: bool
     grouped["avg_hours"] = grouped["avg_hours"].round(2)
     return grouped.sort_values("avg_hours", ascending=ascending).head(n).reset_index(drop=True)
 
-
 def creation_to_completion_by_hour(df: pd.DataFrame) -> pd.DataFrame:
     """Avg creation-to-completion time grouped by the hour of day (0-23)
     the order was CREATED (created_at) — shows whether orders placed at
@@ -518,12 +431,11 @@ def creation_to_completion_by_hour(df: pd.DataFrame) -> pd.DataFrame:
     grouped["avg_hours"] = grouped["avg_hours"].round(2)
     return grouped.sort_values("hour_of_day").reset_index(drop=True)
 
-
 def at_risk_shipments(df: pd.DataFrame) -> pd.DataFrame:
     """Shipments still in flight whose target delivery time has already
     passed — the 'captain still has orders overdue' alert Ahmed described.
     Sorted by how overdue (most overdue first)."""
-    risky = df[df["is_overdue"] == True].copy()  # noqa: E712 (explicit bool compare reads clearer here)
+    risky = df[df["is_overdue"] == True].copy()
     if risky.empty:
         return pd.DataFrame(columns=["shipment_id", "courier_name", "merchant_name", "status",
                                       "target_deliver_at", "hours_overdue"])
@@ -533,7 +445,6 @@ def at_risk_shipments(df: pd.DataFrame) -> pd.DataFrame:
         risky[["shipment_id", "courier_name", "merchant_name", "status", "target_deliver_at", "hours_overdue"]]
         .sort_values("hours_overdue", ascending=False)
     )
-
 
 def risk_by_courier(df: pd.DataFrame) -> pd.DataFrame:
     """How many overdue shipments each courier currently has — this is
@@ -548,34 +459,10 @@ def risk_by_courier(df: pd.DataFrame) -> pd.DataFrame:
         .sort_values("overdue_orders", ascending=False)
     )
 
-
-# ---------------------------------------------------------------------------
-# Courier shift risk (replaces the old target_deliver_at-based "overdue"
-# view). Rationale, confirmed with the business (2026-07-19):
-#   - target_deliver_at (date_to_deliver_shipment) is a dispatcher-editable
-#     field. A binary "now > target_deliver_at" flag — or even a % of that
-#     same window — can be pushed out of "risk" just by editing the target,
-#     so it doesn't reliably reflect whether a courier is actually behind.
-#   - Couriers work a single fixed shift, 5:00 PM to 11:00 PM (6 hours),
-#     the same for everyone, every day. That's a business fact, not a
-#     column in the data, so it's hardcoded here rather than read from
-#     any field.
-#   - The only two things this section trusts are how many shipments a
-#     courier has fully closed out today (delivered_at / returned_at,
-#     both real fixed timestamps — see module docstring) and how many
-#     non-terminal shipments are still assigned to them right now
-#     (status, courier_id). Neither can be edited after the fact the way
-#     target_deliver_at can.
-#   - Risk = comparing "% of the shift elapsed" against "% of today's
-#     workload actually closed out" for that courier. A courier who's
-#     closed proportionally fewer orders than the shift clock would
-#     suggest is falling behind; how far behind sets the risk level.
-# ---------------------------------------------------------------------------
-SHIFT_START_HOUR = 17   # 5:00 PM
-SHIFT_END_HOUR = 23     # 11:00 PM (6-hour shift)
+SHIFT_START_HOUR = 17
+SHIFT_END_HOUR = 23
 
 RISK_LEVEL_ORDER = {"🔴 Overdue": 0, "🔴 At risk": 1, "🟡 Watch": 2, "🟢 Healthy": 3}
-
 
 def get_shift_progress(now: "pd.Timestamp | None" = None) -> dict:
     """Where 'right now' sits inside today's fixed 5 PM–11 PM shift.
@@ -598,7 +485,6 @@ def get_shift_progress(now: "pd.Timestamp | None" = None) -> dict:
         "elapsed_hours": round(elapsed_seconds / 3600, 2),
         "shift_length_hours": round(shift_length_seconds / 3600, 2),
     }
-
 
 def courier_shift_risk(df: pd.DataFrame, now: "pd.Timestamp | None" = None) -> pd.DataFrame:
     """One row per courier who has any activity today (something closed
@@ -628,9 +514,6 @@ def courier_shift_risk(df: pd.DataFrame, now: "pd.Timestamp | None" = None) -> p
         "expected_progress_pct", "gap_pct", "risk_level",
     ])
     if not progress["active"] and progress["now"] < progress["shift_start"]:
-        # Before today's shift has started, "remaining" would just be
-        # leftover in-flight shipments from a previous shift/day with no
-        # meaningful expected_progress_pct to compare against.
         return empty
 
     assigned = df[df["courier_id"].notna()].copy()
@@ -703,7 +586,6 @@ def courier_shift_risk(df: pd.DataFrame, now: "pd.Timestamp | None" = None) -> p
         "expected_progress_pct", "gap_pct", "risk_level",
     ]]
 
-
 def courier_shift_risk_summary(risk_df: pd.DataFrame) -> dict:
     """Counts feeding the small KPI row above the courier-risk table."""
     if risk_df.empty:
@@ -717,9 +599,7 @@ def courier_shift_risk_summary(risk_df: pd.DataFrame) -> dict:
         "total_remaining": int(risk_df["remaining"].sum()),
     }
 
-
-STALE_OPEN_SHIPMENT_DAYS = 2  # agreed threshold (2026-07-19): created_at 2+ days ago, still open
-
+STALE_OPEN_SHIPMENT_DAYS = 2
 
 def stale_open_shipments(df: pd.DataFrame, days: int = STALE_OPEN_SHIPMENT_DAYS,
                           now: "pd.Timestamp | None" = None) -> pd.DataFrame:
@@ -754,7 +634,6 @@ def stale_open_shipments(df: pd.DataFrame, days: int = STALE_OPEN_SHIPMENT_DAYS,
         .sort_values("days_open", ascending=False)
         .reset_index(drop=True)
     )
-
 
 def financial_breakdown(df: pd.DataFrame) -> dict:
     """
@@ -801,9 +680,6 @@ def financial_breakdown(df: pd.DataFrame) -> dict:
     delivered = completed[completed["status"] == "delivered"]
     returned = completed[completed["status"] == "returned"]
 
-    # The specific comparison asked for: on returned COD orders, weevo's
-    # shipping+fee revenue as a % of the order's own value. >100% means
-    # Weevo earned MORE from the failed delivery than the order was worth.
     returned_cod = returned[(returned["payment_method"] == "cod") & (returned["amount"] > 0)]
     if not returned_cod.empty:
         ratio_pct = round((returned_cod["weevo_revenue"] / returned_cod["amount"]).mean() * 100, 1)
@@ -815,7 +691,6 @@ def financial_breakdown(df: pd.DataFrame) -> dict:
         "returned": _segment_stats(returned),
         "returned_revenue_vs_order_value_pct": ratio_pct,
     }
-
 
 def overdue_age_buckets(df: pd.DataFrame) -> pd.DataFrame:
     """How overdue, grouped into buckets — '208 overdue' means something
@@ -832,7 +707,6 @@ def overdue_age_buckets(df: pd.DataFrame) -> pd.DataFrame:
     result["_sort"] = result["bucket"].map(order_map)
     return result.sort_values("_sort").drop(columns="_sort").reset_index(drop=True)
 
-
 def overdue_by_area(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     """Which areas have the most overdue shipments right now — pairs with
     risk_by_courier() to answer 'is this a courier problem or an area
@@ -841,38 +715,12 @@ def overdue_by_area(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     risky = at_risk_shipments(df)
     if risky.empty or "area" not in df.columns:
         return pd.DataFrame(columns=["area", "overdue_orders"])
-    # at_risk_shipments() doesn't carry 'area' through — re-merge it here
-    # rather than changing that function's return columns for everyone else.
     risky = risky.merge(df[["shipment_id", "area"]], on="shipment_id", how="left")
     return (
         risky.groupby("area").size().reset_index(name="overdue_orders")
         .sort_values("overdue_orders", ascending=False).head(n)
     )
 
-
-# ---------------------------------------------------------------------------
-# Archive (ADDED) — same purpose as v1's archive in analytics_pipeline.py:
-# the live API only ever returns "most recent N per status", so the only
-# way to ever answer a real historical date-range question is to save our
-# own daily snapshots over time and read those back later.
-#
-# This is a SEPARATE file from v1's archive (DEFAULT_ARCHIVE_PATH), not an
-# extension of it. Two deliberate reasons, both about avoiding the "ممنوع
-# أي إيرور" risk of touching a working file:
-#   1. Schema: v1's ARCHIVE_COLUMNS is a fixed 17-column shape used by
-#      load_uploaded_csv()'s validation and by every v1 aggregation
-#      function via strict `df[ARCHIVE_COLUMNS]` selection. Widening that
-#      file to also hold v2's 26 columns (revenue, pickup logs, is_overdue)
-#      would touch code that currently works.
-#   2. Grain: v1 rows come from ALL statuses with a fixed pagination
-#      budget; v2 rows come from PRIMARY_STATUSES with a much larger
-#      budget (5,000/status) plus a separate risk-only pull. Merging them
-#      into one file would mean most rows have huge gaps in one schema or
-#      the other — not an error, just messy and easy to misread.
-# Same shipment saved from both places (e.g. a delivered order visible to
-# both v1 and v2) simply exists in both archive files under its own
-# shipment_id — harmless, each file stays internally consistent.
-# ---------------------------------------------------------------------------
 ARCHIVE_V2_COLUMNS = [
     "shipment_id", "reference", "status", "merchant_id", "merchant_name",
     "courier_id", "courier_name", "client_name", "client_phone",
@@ -889,7 +737,6 @@ _V2_NUMERIC_COLS = ["amount", "agreed_shipping_cost", "transfer_fee",
 
 DEFAULT_V2_ARCHIVE_PATH = "./data/analytics_archive_v2.csv"
 
-
 def _empty_v2_archive_df() -> pd.DataFrame:
     df = pd.DataFrame(columns=ARCHIVE_V2_COLUMNS)
     for col in _V2_DATETIME_COLS:
@@ -898,7 +745,6 @@ def _empty_v2_archive_df() -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["is_overdue"] = df["is_overdue"].astype(bool)
     return df
-
 
 def get_v2_archive_file_info(archive_path: str = DEFAULT_V2_ARCHIVE_PATH) -> dict:
     """Same diagnostic purpose as v1's get_archive_file_info() — lets the
@@ -918,7 +764,6 @@ def get_v2_archive_file_info(archive_path: str = DEFAULT_V2_ARCHIVE_PATH) -> dic
         "size_kb": round(stat.st_size / 1024, 1),
         "row_count": len(load_v2_archive(archive_path)),
     }
-
 
 def load_v2_archive(archive_path: str = DEFAULT_V2_ARCHIVE_PATH) -> pd.DataFrame:
     """Reads whatever v2 data has been saved so far. Empty (but
@@ -954,7 +799,6 @@ def load_v2_archive(archive_path: str = DEFAULT_V2_ARCHIVE_PATH) -> pd.DataFrame
         df["is_overdue"] = False
     return df
 
-
 def append_to_v2_archive(df: pd.DataFrame, archive_path: str = DEFAULT_V2_ARCHIVE_PATH) -> dict:
     """Merges `df` (output of load_shipments_v2(), i.e. already
     parse_shipment()-shaped) into the on-disk v2 archive. Same
@@ -982,13 +826,9 @@ def append_to_v2_archive(df: pd.DataFrame, archive_path: str = DEFAULT_V2_ARCHIV
     combined = combined.drop_duplicates(subset=["shipment_id"], keep="last")
     if "created_at" in combined.columns:
         combined = combined.sort_values("created_at", na_position="last").reset_index(drop=True)
-    # is_overdue is a live judgement, not a fact worth freezing — drop it
-    # from what's written to disk and let load_v2_archive() recompute it
-    # fresh every read (see that function's docstring).
     combined.drop(columns=["is_overdue"]).to_csv(archive_path, index=False)
 
     return {"added": added_count, "updated": updated_count, "total_in_archive": len(combined)}
-
 
 def detect_v2_archive_gap(archive_df: pd.DataFrame, live_df: pd.DataFrame) -> dict:
     """Same purpose as v1's detect_archive_gap(): did too much time pass
