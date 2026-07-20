@@ -1711,15 +1711,35 @@ def render_analytics_page():
             # stale_open_shipments() docstring for why this can only say
             # "created X days ago, still open" — not "stuck" or "forgotten"
             # (no "last status update" timestamp exists in this data).
+            #
+            # BUG FIX (2026-07-20): df_v2 above is bounded by the top-level
+            # Date range picker — with a narrow preset like "Last 24 hours",
+            # the server-side fetch itself excludes anything older than
+            # ~a day, so this section could never actually see a 2+ day
+            # old stale shipment, no matter how many exist. Always pulls
+            # "All time" independently instead, regardless of the Date
+            # range picked above — same Area/Merchant filters still apply.
+            # Archive source has no date-range concept (a saved snapshot is
+            # already everything in it), so reused as-is there.
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown(
                 '<p class="wa-section-title" style="font-size:13px;">Open shipments not yet resolved</p>'
                 f'<p class="wa-section-sub">Shipments created {STALE_OPEN_SHIPMENT_DAYS}+ days ago that are '
                 'still not delivered/returned/cancelled — separate from shift risk above, since these aren\'t '
-                'necessarily today\'s shift falling behind.</p>',
+                'necessarily today\'s shift falling behind. Always checks all time, regardless of the Date '
+                'range selected above.</p>',
                 unsafe_allow_html=True,
             )
-            stale = stale_open_shipments(df_v2)
+            if v2_from_archive:
+                stale_source = df_v2
+            else:
+                stale_source = _cached_v2_load(api_key, start_date=None, end_date=None)
+                if not stale_source.empty:
+                    if selected_areas:
+                        stale_source = stale_source[stale_source["area"].isin(selected_areas)]
+                    if selected_merchants:
+                        stale_source = stale_source[stale_source["merchant_name"].isin(selected_merchants)]
+            stale = stale_open_shipments(stale_source)
             if stale.empty:
                 st.success(f"✅ No shipments open {STALE_OPEN_SHIPMENT_DAYS}+ days.")
             else:
