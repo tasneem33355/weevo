@@ -1080,11 +1080,11 @@ def orders_over_time(df: pd.DataFrame, granularity: str = "D") -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["period", "orders", "revenue"])
     grouped = (
-        df.set_index("delivery_date")
+        df.set_index("created_at")
         .resample(granularity)
         .agg(orders=("shipment_id", "count"), revenue=("amount", "sum"))
         .reset_index()
-        .rename(columns={"delivery_date": "period"})
+        .rename(columns={"created_at": "period"})
     )
     return grouped
 
@@ -1182,16 +1182,16 @@ def merchant_activity(df: pd.DataFrame, recent_days: int = 7, compare_days: int 
         result.attrs["excluded_unknown_count"] = 0
         return result
 
-    latest = df["delivery_date"].max()
+    latest = df["created_at"].max()
     recent_start = latest - pd.Timedelta(days=recent_days)
     prev_start = recent_start - pd.Timedelta(days=compare_days)
 
-    window = df[df["delivery_date"] >= prev_start]
+    window = df[df["created_at"] >= prev_start]
     excluded_count = int((window["merchant_name"] == "Unknown").sum())
     known = df[df["merchant_name"] != "Unknown"]
 
-    recent = known[known["delivery_date"] >= recent_start].groupby("merchant_name")["shipment_id"].count()
-    previous = known[(known["delivery_date"] >= prev_start) & (known["delivery_date"] < recent_start)].groupby("merchant_name")["shipment_id"].count()
+    recent = known[known["created_at"] >= recent_start].groupby("merchant_name")["shipment_id"].count()
+    previous = known[(known["created_at"] >= prev_start) & (known["created_at"] < recent_start)].groupby("merchant_name")["shipment_id"].count()
 
     merchants = sorted(set(recent.index) | set(previous.index))
     rows = []
@@ -1285,10 +1285,10 @@ def merchants_with_zero_orders(full_roster_df: pd.DataFrame, shipments_df: pd.Da
 def recent_orders(df: pd.DataFrame, n: int = 15) -> pd.DataFrame:
     """Most recent shipments, for a live-feed-style table."""
     if df.empty:
-        return pd.DataFrame(columns=["shipment_id", "merchant_name", "courier_name", "area", "amount", "delivery_date"])
+        return pd.DataFrame(columns=["shipment_id", "merchant_name", "courier_name", "area", "amount", "created_at"])
     return (
-        df.sort_values("delivery_date", ascending=False)
-        [["shipment_id", "merchant_name", "courier_name", "area", "amount", "delivery_date"]]
+        df.sort_values("created_at", ascending=False)
+        [["shipment_id", "merchant_name", "courier_name", "area", "amount", "created_at"]]
         .head(n)
         .reset_index(drop=True)
     )
@@ -1493,15 +1493,15 @@ def detect_archive_gap(archive_df: pd.DataFrame, live_df: pd.DataFrame) -> dict:
     Returns a plain dict, never raises — always safe to call even with an
     empty archive (first-ever save) or empty live data (fetch failed).
     """
-    if archive_df is None or archive_df.empty or "delivery_date" not in archive_df.columns:
+    if archive_df is None or archive_df.empty or "created_at" not in archive_df.columns:
         return {"has_gap": False, "gap_hours": None, "archive_latest": None,
                 "live_oldest": None, "reason": "no_archive_yet"}
-    if live_df is None or live_df.empty or "delivery_date" not in live_df.columns:
+    if live_df is None or live_df.empty or "created_at" not in live_df.columns:
         return {"has_gap": False, "gap_hours": None, "archive_latest": None,
                 "live_oldest": None, "reason": "no_live_data"}
 
-    archive_latest = pd.to_datetime(archive_df["delivery_date"], errors="coerce").max()
-    live_oldest = pd.to_datetime(live_df["delivery_date"], errors="coerce").min()
+    archive_latest = pd.to_datetime(archive_df["created_at"], errors="coerce").max()
+    live_oldest = pd.to_datetime(live_df["created_at"], errors="coerce").min()
 
     if pd.isna(archive_latest) or pd.isna(live_oldest):
         return {"has_gap": False, "gap_hours": None, "archive_latest": None,
