@@ -635,6 +635,197 @@ def stale_open_shipments(df: pd.DataFrame, days: int = STALE_OPEN_SHIPMENT_DAYS,
         .reset_index(drop=True)
     )
 
+DAILY_BREAKDOWN_MAX_DAYS = 14
+
+def courier_performance_by_period(df: pd.DataFrame, start_date, end_date,
+                                   now: "pd.Timestamp | None" = None) -> dict:
+    """Per-courier workload for whatever date range is selected in the
+    sidebar (2026-07-20 replacement for the old 'always checks today,
+    5 PM-11 PM' shift view) — same trustworthy logic as courier_shift_risk()
+    (actual closed-out work vs. elapsed available time), just generalized
+    from a single fixed shift to any start_date/end_date span. Deliberately
+    built only from created_at/delivered_at/returned_at — never from
+    target_pickup_at/target_deliver_at, since those are editable and not a
+    trustworthy benchmark (same reasoning as courier_shift_risk()).
+
+    For each calendar day D in [start_date, end_date]:
+      assigned         = orders with created_at.date() == D, per courier
+      closed_same_day  = of those, delivered_at.date() == D OR
+                          returned_at.date() == D
+      carried_over     = assigned - closed_same_day (resolved on a later
+                          day, or still open) — only meaningful for days
+                          that are already over; today is handled
+                          separately below since it isn't over yet.
+
+    Returns a dict:
+      "daily"       — [date, courier_name, assigned, closed_same_day,
+                       carried_over], only populated when the span is
+                       short enough for a table (see show_daily_table)
+      "show_daily_table" — bool, span_days <= DAILY_BREAKDOWN_MAX_DAYS
+      "trend"       — [date, assigned, closed_same_day], for a chart when
+                       the span is too long for a daily table
+      "by_courier"  — [courier_name, assigned, closed_same_day,
+                       carried_over, closure_rate_pct], always populated,
+                       one row per courier for the whole period
+      "by_area"     — [area, assigned, closed_same_day, closure_rate_pct]
+      "today"       — dict with today's elapsed-shift pacing/risk (same
+                       shape as courier_shift_risk), only present if today
+                       falls inside [start_date, end_date]; None otherwise
+      "span_days"   — int
+    """
+    if now is None:
+        now = pd.Timestamp.now()
+    today = now.normalize().date()
+
+    result = {
+        "daily": pd.DataFrame(columns=["date", "courier_name", "assigned", "closed_same_day", "carried_over"]),
+        "show_daily_table": False,
+        "trend": pd.DataFrame(columns=["date", "assigned", "closed_same_day"]),
+        "by_courier": pd.DataFrame(columns=["courier_name", "assigned", "closed_same_day", "carried_over", "closure_rate_pct"]),
+        "by_area": pd.DataFrame(columns=["area", "assigned", "closed_same_day", "closure_rate_pct"]),
+        "today": None,
+        "span_days": 0,
+    }
+    if df is None or df.empty or start_date is None or end_date is None or "created_at" not in df.columns:
+        return result
+
+    assigned = df[df["courier_id"].notna() & df["created_at"].notna()].copy()
+    if assigned.empty:
+        return result
+
+    assigned["created_date"] = assigned["created_at"].dt.date
+    in_range = assigned[
+        (assigned["created_date"] >= start_date) & (assigned["created_date"] <= end_date)
+    ].copy()
+    if in_range.empty:
+        return result
+
+    in_range["closed_same_day"] = (
+        (in_range["delivered_at"].notna() & (in_range["delivered_at"].dt.date == in_range["created_date"]))
+        | (in_range["returned_at"].notna() & (in_range["returned_at"].dt.date == in_range["created_date"]))
+    )
+
+    result["span_days"] = (end_date - start_date).days + 1
+
+    daily = (
+        in_range.groupby(["created_date", "courier_name"])
+        .agg(assigned=("shipment_id", "count"), closed_same_day=("closed_same_day", "sum"))
+        .reset_index()
+        .rename(columns={"created_date": "date"})
+    )
+    daily["carried_over"] = daily["assigned"] - daily["closed_same_day"]
+    result["daily"] = daily.sort_values(["date", "carried_over"], ascending=[True, False]).reset_index(drop=True)
+    result["show_daily_table"] = result["span_days"] <= DAILY_BREAKDOWN_MAX_DAYS
+
+    result["trend"] = (
+        in_range.groupby("created_date")
+        .agg(assigned=("shipment_id", "count"), closed_same_day=("closed_same_day", "sum"))
+        .reset_index()
+        .rename(columns={"created_date": "date"})
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+
+    by_courier = (
+        in_range.groupby("courier_name")
+        .agg(assigned=("shipment_id", "count"), closed_same_day=("closed_same_day", "sum"))
+        .reset_index()
+    )
+    by_courier["carried_over"] = by_courier["assigned"] - by_courier["closed_same_day"]
+    by_courier["closure_rate_pct"] = (by_courier["closed_same_day"] / by_courier["assigned"] * 100).round(1)
+    result["by_courier"] = by_courier.sort_values("carried_over", ascending=False).reset_index(drop=True)
+
+    if "area" in in_range.columns:
+        area_src = in_range[in_range["area"] != "Unknown"]
+        if not area_src.empty:
+            by_area = (
+                area_src.groupby("area")
+                .agg(assigned=("shipment_id", "count"), closed_same_day=("closed_same_day", "sum"))
+                .reset_index()
+            )
+            by_area["closure_rate_pct"] = (by_area["closed_same_day"] / by_area["assigned"] * 100).round(1)
+            result["by_area"] = by_area.sort_values("closure_rate_pct", ascending=False).reset_index(drop=True)
+
+    if start_date <= today <= end_date:
+        progress = get_shift_progress(now)
+        today_result = {
+            "active": progress["active"], "now": progress["now"],
+            "shift_start": progress["shift_start"], "shift_end": progress["shift_end"],
+            "elapsed_pct": progress["elapsed_pct"], "elapsed_hours": progress["elapsed_hours"],
+            "shift_length_hours": progress["shift_length_hours"],
+            "risk": pd.DataFrame(columns=[
+                "courier_name", "delivered_today", "returned_today", "completed_today",
+                "remaining", "actual_progress_pct", "expected_progress_pct", "gap_pct", "risk_level",
+            ]),
+        }
+        today_slice = in_range[in_range["created_date"] == today]
+        if progress["active"] and not today_slice.empty:
+            t = today_slice.copy()
+            t["_delivered"] = t["delivered_at"].notna() & (t["delivered_at"].dt.date == today)
+            t["_returned"] = t["returned_at"].notna() & (t["returned_at"].dt.date == today)
+            per_courier = (
+                t.groupby("courier_name")
+                .agg(delivered_today=("_delivered", "sum"), returned_today=("_returned", "sum"),
+                     assigned=("shipment_id", "count"))
+                .reset_index()
+            )
+            per_courier["completed_today"] = per_courier["delivered_today"] + per_courier["returned_today"]
+            per_courier["remaining"] = per_courier["assigned"] - per_courier["completed_today"]
+            per_courier = per_courier[(per_courier["completed_today"] > 0) | (per_courier["remaining"] > 0)].copy()
+            if not per_courier.empty:
+                per_courier["actual_progress_pct"] = (
+                    per_courier["completed_today"] / per_courier["assigned"] * 100
+                ).round(1)
+                per_courier["expected_progress_pct"] = progress["elapsed_pct"]
+                per_courier["gap_pct"] = (per_courier["expected_progress_pct"] - per_courier["actual_progress_pct"]).round(1)
+                shift_over = progress["now"] >= progress["shift_end"]
+
+                def _risk(row):
+                    if shift_over and row["remaining"] > 0:
+                        return "🔴 Overdue"
+                    if row["gap_pct"] <= 10:
+                        return "🟢 Healthy"
+                    if row["gap_pct"] <= 25:
+                        return "🟡 Watch"
+                    return "🔴 At risk"
+
+                per_courier["risk_level"] = per_courier.apply(_risk, axis=1)
+                per_courier["_sort"] = per_courier["risk_level"].map(RISK_LEVEL_ORDER)
+                per_courier = (
+                    per_courier.sort_values(["_sort", "remaining"], ascending=[True, False])
+                    .drop(columns="_sort").reset_index(drop=True)
+                )
+                today_result["risk"] = per_courier[[
+                    "courier_name", "delivered_today", "returned_today", "completed_today",
+                    "remaining", "actual_progress_pct", "expected_progress_pct", "gap_pct", "risk_level",
+                ]]
+        result["today"] = today_result
+
+    return result
+
+def courier_performance_summary(perf: dict) -> dict:
+    """Small KPI-row counts for the period view — historical carried-over
+    couriers (span already over for that day) plus today's live risk bands
+    (if today is inside the selected period), combined into one summary."""
+    by_courier = perf.get("by_courier", pd.DataFrame())
+    total_carried_over = int(by_courier["carried_over"].sum()) if not by_courier.empty else 0
+    couriers_with_carryover = int((by_courier["carried_over"] > 0).sum()) if not by_courier.empty else 0
+
+    today = perf.get("today")
+    healthy = watch = at_risk = overdue = 0
+    if today is not None and not today["risk"].empty:
+        counts = today["risk"]["risk_level"].value_counts()
+        healthy = int(counts.get("🟢 Healthy", 0))
+        watch = int(counts.get("🟡 Watch", 0))
+        at_risk = int(counts.get("🔴 At risk", 0))
+        overdue = int(counts.get("🔴 Overdue", 0))
+
+    return {
+        "total_carried_over": total_carried_over,
+        "couriers_with_carryover": couriers_with_carryover,
+        "healthy": healthy, "watch": watch, "at_risk": at_risk, "overdue": overdue,
+    }
+
 def financial_breakdown(df: pd.DataFrame) -> dict:
     """
     Deeper split of revenue_summary() — same underlying weevo_revenue
