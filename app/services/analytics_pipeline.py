@@ -82,66 +82,28 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
-import httpx  # matches app/services/external_api.py — requests is not in requirements.txt
+import httpx
 
 WEEVO_API_BASE_URL = os.getenv("WEEVO_API_BASE_URL", "https://eg.api.weevoapp.com")
 
-# Admin Dashboard endpoint (2026-07 migration — see module docstring).
-# One combined pull covers every status in a date range, so there is no
-# more "WEEVO_STATUS_OPTIONS" per-status loop to configure.
 ADMIN_SHIPMENTS_PATH = "/api/v1/admin-5678vna9k6/shipments"
-ADMIN_PAGE_SIZE = 500          # raised from 100 (2026-07-18): confirmed working
-                               # up to 500 (and 1000) via the official dashboard's
-                               # "Rows per Page" control on the same admin endpoint —
-                               # fewer, larger pages means far fewer requests to
-                               # cover the same date range inside FETCH_TIME_BUDGET_V1
-ADMIN_DEFAULT_COUNTRY_ID = 1   # confirmed always 1
-ADMIN_DEFAULT_IN_BATCH = 0     # confirmed default, same as the official dashboard
+ADMIN_PAGE_SIZE = 500
+ADMIN_DEFAULT_COUNTRY_ID = 1
+ADMIN_DEFAULT_IN_BATCH = 0
 
-# Bearer-token auth (2026-07-16 correction): login-using-token turned out to
-# be a REFRESH endpoint for an already-authenticated browser session, not a
-# bootstrap login — it expects an existing valid JWT, not the old 26-char
-# WEEVO_API_KEY integration key, which is why that path 401'd. The real
-# bootstrap is a standard email+password login, confirmed against a real
-# captured browser request. WEEVO_ADMIN_EMAIL / WEEVO_ADMIN_PASSWORD (never
-# WEEVO_API_KEY) now log in once via ADMIN_EMAIL_LOGIN_PATH to obtain a
-# short-lived access token. That token is what goes on every Admin
-# Dashboard request afterwards, as `Authorization: Bearer <access_token>`.
-# Path confirmed 2026-07-16 against the real captured Request URL:
-# https://eg.api.weevoapp.com/api/v1/admin-5678vna9k6/login — same
-# admin-5678vna9k6 scope as every other endpoint in this module.
 ADMIN_EMAIL_LOGIN_PATH = "/api/v1/admin-5678vna9k6/login"
-TOKEN_EXPIRY_SKEW_V1 = 30      # seconds of safety margin subtracted from the
-                               # server's expires_at, so a token never gets
-                               # used right up to the wire and rejected
-                               # mid-request by clock drift.
-_ADMIN_TOKEN_CACHE: dict = {}       # keyed by (base_url, api_key) -> {"access_token", "expires_at"}
+TOKEN_EXPIRY_SKEW_V1 = 30
+_ADMIN_TOKEN_CACHE: dict = {}
 _ADMIN_TOKEN_CACHE_LOCK = threading.Lock()
 
-# `HEAVY_STATUSES_V1` is still used by streamlit_ui/analytics_page.py (the
-# "data coverage" banner) to distinguish statuses with a real dated event
-# from in-flight ones — kept exactly as-is, it's a calculation detail, not
-# a fetch detail.
 HEAVY_STATUSES_V1 = {"delivered", "returned"}
 GATEWAY_ERROR_CODES_V1 = {502, 503, 504}
-REQUEST_TIMEOUT_V1 = 20          # seconds — a 502/504 is the gateway giving
-                                  # up on ITS side, so a longer client-side
-                                  # timeout doesn't help; kept modest instead.
-MAX_RETRIES_V1 = 1               # 1 retry (2 attempts total) per request
-RETRY_PAUSE_V1 = 1.5             # seconds to wait before a retry
-INTER_REQUEST_DELAY_V1 = 0.35    # seconds between every individual request,
-                                  # sequential only — no concurrency — so
-                                  # requests never pile up on their backend
-FETCH_TIME_BUDGET_V1 = 90        # seconds — hard ceiling on total wall-clock
-                                  # time for a full fetch_admin_shipments()
-                                  # call. Once exceeded, remaining pages are
-                                  # marked as skipped rather than attempted, so
-                                  # a fully-down backend fails predictably in
-                                  # ~90s instead of stalling the page for minutes.
+REQUEST_TIMEOUT_V1 = 20
+MAX_RETRIES_V1 = 1
+RETRY_PAUSE_V1 = 1.5
+INTER_REQUEST_DELAY_V1 = 0.35
+FETCH_TIME_BUDGET_V1 = 90
 
-# Canonical column set shared by every source (api / db / mock) — used by
-# the archive functions below so a saved/uploaded snapshot round-trips
-# perfectly regardless of which source it originally came from.
 ARCHIVE_COLUMNS = [
     "phone_number", "shipment_id", "product_name", "merchant_name",
     "courier_name", "courier_phone", "delivery_address", "delivery_city",
@@ -151,26 +113,6 @@ ARCHIVE_COLUMNS = [
 DEFAULT_ARCHIVE_PATH = "./data/analytics_archive.csv"
 AREA_CACHE_PATH = "./data/area_classification_cache.csv"
 
-# ---------------------------------------------------------------------------
-# Area detection — this is the SAME full keyword list as
-# streamlit_ui/dashboard.py's AREA_KEYWORDS (Dispatch Planner), copied here
-# directly instead of imported.
-#
-# WHY NOT IMPORT IT: `from streamlit_ui.dashboard import AREA_KEYWORDS` looks
-# harmless but actually executes the ENTIRE dashboard.py module (Python has
-# no way to import just one name without running the whole file first) —
-# including Tia's LangChain/OpenAI initialization and every other module-
-# level side effect in that file. If ANY of that fails for any reason
-# (a missing env var at that moment, a slow DB connection, etc.), the import
-# silently fails and this used to fall back to a 5-area stub — which is
-# almost certainly why areas were missing even though the real 20+ area
-# list already exists in dashboard.py. Copying the dict directly here
-# removes that entire fragile dependency chain.
-#
-# If Weevo's real coverage areas expand or the keywords in dashboard.py's
-# AREA_KEYWORDS get updated, copy the updated dict here too so the two
-# stay in sync.
-# ---------------------------------------------------------------------------
 AREA_KEYWORDS = {
     "New Cairo": [
         "التجمع", "التجمع الاول", "التجمع الأول", "التجمع التالت", "التجمع الثالث",
@@ -258,7 +200,7 @@ AREA_KEYWORDS = {
 ],
     "Downtown": [
        "وسط البلد", "downtown",
-        "التحرير", "باب الشعريه", "باب الشعرية", "السيدة زينب", "السيده زينب", "الفجالة", "الفجاله", "fagalaa", "fagala",# "tahrir",
+        "التحرير", "باب الشعريه", "باب الشعرية", "السيدة زينب", "السيده زينب", "الفجالة", "الفجاله", "fagalaa", "fagala",
         "طلعت حرب", "talaat harb",
         "رمسيس", "ramses",
         "العتبة", "ataba",
@@ -424,7 +366,6 @@ AREA_KEYWORDS = {
     ]
 }
 
-
 def _normalize_text(text: str) -> str:
     if not text:
         return ""
@@ -435,13 +376,11 @@ def _normalize_text(text: str) -> str:
     )
     return text.lower().strip()
 
-
 _AREA_KEYWORDS_NORMALIZED = [
     (area, _normalize_text(kw))
     for area, kws in AREA_KEYWORDS.items()
     for kw in kws
 ]
-
 
 def detect_area(address: Optional[str]) -> str:
     """Same keyword-matching logic as the existing Dispatch Planner."""
@@ -453,23 +392,6 @@ def detect_area(address: Optional[str]) -> str:
             return area
     return "Unknown"
 
-
-# ---------------------------------------------------------------------------
-# Area classification cache + optional AI fallback for addresses that don't
-# match any AREA_KEYWORDS entry (real addresses will always have spelling
-# variants a fixed keyword list can't fully cover).
-#
-# Two-layer design:
-#   1. Cache lookup (enrich_areas_with_cache) — FREE, runs automatically on
-#      every load. Once an address has been classified once (by cache or by
-#      AI), it's remembered on disk forever and never costs anything again.
-#   2. AI classification (classify_unknown_addresses) — PAID (calls OpenAI),
-#      only runs when explicitly triggered by the person (a button in the
-#      UI), reuses dashboard.py's classify_unknown_areas_gpt logic exactly
-#      but without any Streamlit coupling so it works as a plain pipeline
-#      function. Every result it produces is written to the cache, so the
-#      same address is never sent to GPT twice.
-# ---------------------------------------------------------------------------
 def _load_area_cache(cache_path: str = AREA_CACHE_PATH) -> dict:
     """normalized_address -> area. Missing/corrupt cache = empty dict, never an error."""
     if not os.path.exists(cache_path):
@@ -480,13 +402,11 @@ def _load_area_cache(cache_path: str = AREA_CACHE_PATH) -> dict:
     except Exception:
         return {}
 
-
 def _save_area_cache(cache: dict, cache_path: str = AREA_CACHE_PATH) -> None:
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     pd.DataFrame(
         [{"normalized_address": k, "area": v} for k, v in cache.items()]
     ).to_csv(cache_path, index=False, encoding="utf-8-sig")
-
 
 def enrich_areas_with_cache(df: pd.DataFrame, cache_path: str = AREA_CACHE_PATH) -> pd.DataFrame:
     """FREE pass: fills in df['area'] for any 'Unknown' row whose address was
@@ -506,10 +426,9 @@ def enrich_areas_with_cache(df: pd.DataFrame, cache_path: str = AREA_CACHE_PATH)
     if not unknown_mask.any():
         return df
     normalized = df.loc[unknown_mask, addr_col].fillna("").map(_normalize_text)
-    resolved = normalized.map(cache)  # NaN where not in cache
+    resolved = normalized.map(cache)
     df.loc[unknown_mask, "area"] = resolved.fillna(df.loc[unknown_mask, "area"])
     return df
-
 
 def classify_unknown_areas_gpt(addresses: list, known_areas: list, openai_api_key: str) -> dict:
     """Same approach as streamlit_ui/dashboard.py's classify_unknown_areas_gpt
@@ -557,7 +476,6 @@ def classify_unknown_areas_gpt(addresses: list, known_areas: list, openai_api_ke
 
     return results
 
-
 def classify_unknown_addresses(df: pd.DataFrame, openai_api_key: str,
                                 cache_path: str = AREA_CACHE_PATH) -> tuple:
     """
@@ -588,10 +506,6 @@ def classify_unknown_addresses(df: pd.DataFrame, openai_api_key: str,
                      "newly_classified": 0, "unknown_after": unknown_before, "errors": []}
 
     unknown_rows = df[df["area"] == "Unknown"]
-    # Map normalized_address -> one representative original address string
-    # (GPT sees the original text; the cache key is the normalized version
-    # so minor whitespace/diacritic differences still hit the same cache
-    # entry next time).
     unique_addrs = {}
     for raw_addr in unknown_rows[addr_col].fillna(""):
         norm = _normalize_text(raw_addr)
@@ -608,7 +522,7 @@ def classify_unknown_addresses(df: pd.DataFrame, openai_api_key: str,
     cache = _load_area_cache(cache_path)
     newly_classified = 0
     for idx, area in raw_results.items():
-        if isinstance(idx, str):  # skip the "_error_batch_N" entries
+        if isinstance(idx, str):
             continue
         norm_key = norm_keys[idx]
         if area and area != "Unknown":
@@ -627,29 +541,6 @@ def classify_unknown_addresses(df: pd.DataFrame, openai_api_key: str,
         "errors": errors,
     }
 
-
-# ---------------------------------------------------------------------------
-# REAL data loader — Live API (primary, authoritative source)
-#
-# 2026-07-15 migration: this now talks to the official Weevo ADMIN
-# Dashboard backend instead of the older AI-agent endpoint. Two things
-# changed on purpose, both requested by the business:
-#   1. Date filtering is sent to the server (start_delivery_date /
-#      end_delivery_date) instead of being applied after the fact to a
-#      bounded "most recent N" pull — so numbers now match the official
-#      Admin Dashboard for the same date range.
-#   2. One combined pull per date range instead of one request per
-#      status — confirmed against a real captured response that omitting
-#      `status` returns every status combined, with pagination.total
-#      matching the response's own statusCounts.Total exactly.
-# Every row-mapping choice below (which field feeds which column) is
-# UNCHANGED from the previous implementation — same columns, same
-# fallbacks, same semantics (e.g. "delivered_at" is still the target
-# date_to_deliver_shipment, not the real delivered_date_at, to keep
-# delivery_hours meaning exactly what it meant before) — confirmed with
-# the business rather than "upgraded" silently, since the goal of this
-# migration is a different data source, not different analytics.
-# ---------------------------------------------------------------------------
 def _parse_token_expiry(payload: dict) -> datetime:
     """Normalizes whatever the login response gives us for expiry into a
     timezone-aware UTC datetime, minus TOKEN_EXPIRY_SKEW_V1 seconds of
@@ -669,12 +560,6 @@ def _parse_token_expiry(payload: dict) -> datetime:
         else:
             text = str(raw_expires_at).strip()
             expires_at = None
-            # Confirmed real shape (captured on the old login-using-token
-            # response; assumed — not yet independently confirmed — to be
-            # the same shape on the real /login bootstrap response):
-            # "expires_at": "2126-07-15 04:05:11" — a naive "YYYY-MM-DD
-            # HH:MM:SS" string, no timezone offset. Treated as UTC, same
-            # as every other timestamp compared against in this module.
             try:
                 expires_at = datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             except ValueError:
@@ -697,7 +582,6 @@ def _parse_token_expiry(payload: dict) -> datetime:
         expires_at = now + timedelta(minutes=5)
 
     return expires_at - timedelta(seconds=TOKEN_EXPIRY_SKEW_V1)
-
 
 def _login_admin(base_url: str = WEEVO_API_BASE_URL,
                   timeout: int = REQUEST_TIMEOUT_V1) -> dict:
@@ -734,8 +618,6 @@ def _login_admin(base_url: str = WEEVO_API_BASE_URL,
                 continue
             response.raise_for_status()
             payload = response.json() or {}
-            # Some backends nest the token under a "data" envelope — accept
-            # either shape rather than hard-failing on a wrapper difference.
             data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
             access_token = data.get("access_token")
             if not access_token:
@@ -747,7 +629,6 @@ def _login_admin(base_url: str = WEEVO_API_BASE_URL,
                 time.sleep(RETRY_PAUSE_V1)
                 continue
             raise
-
 
 def _get_admin_bearer_token(api_key: str, base_url: str = WEEVO_API_BASE_URL,
                              force_refresh: bool = False) -> str:
@@ -772,7 +653,6 @@ def _get_admin_bearer_token(api_key: str, base_url: str = WEEVO_API_BASE_URL,
     with _ADMIN_TOKEN_CACHE_LOCK:
         _ADMIN_TOKEN_CACHE[cache_key] = fresh
     return fresh["access_token"]
-
 
 def _fetch_admin_shipments_page(api_key: str, page: int, limit: int = ADMIN_PAGE_SIZE,
                                  start_date: Optional[str] = None, end_date: Optional[str] = None,
@@ -806,8 +686,6 @@ def _fetch_admin_shipments_page(api_key: str, page: int, limit: int = ADMIN_PAGE
         try:
             response = httpx.get(url, headers=headers, params=params, timeout=timeout)
             if response.status_code == 401 and not reauthed:
-                # Token expired/invalidated server-side ahead of our cached
-                # expiry — refresh once and retry, exactly one time.
                 reauthed = True
                 _get_admin_bearer_token(api_key, base_url=base_url, force_refresh=True)
                 continue
@@ -833,7 +711,6 @@ def _fetch_admin_shipments_page(api_key: str, page: int, limit: int = ADMIN_PAGE
                 time.sleep(RETRY_PAUSE_V1)
                 continue
             raise
-
 
 def fetch_admin_shipments(api_key: str, start_date: Optional[str] = None, end_date: Optional[str] = None,
                            country_id: int = ADMIN_DEFAULT_COUNTRY_ID, in_batch: int = ADMIN_DEFAULT_IN_BATCH,
@@ -898,8 +775,6 @@ def fetch_admin_shipments(api_key: str, start_date: Optional[str] = None, end_da
         time.sleep(INTER_REQUEST_DELAY_V1)
 
     if error and not all_records:
-        # Total failure — almost certainly auth/connectivity, not "no
-        # orders". Same non-silent behavior as the old per-status loader.
         raise ConnectionError(
             f"Could not reach the Weevo admin API. Error: {error}"
         )
@@ -913,7 +788,6 @@ def fetch_admin_shipments(api_key: str, start_date: Optional[str] = None, end_da
         "fetched_at": datetime.now().isoformat(),
     }
     return all_records, status_counts, fetch_meta
-
 
 def _v1_fetch_diagnostics_from_meta(fetch_meta: Optional[dict]) -> Optional[dict]:
     """Adapts fetch_admin_shipments()'s generic fetch_meta into the exact
@@ -949,7 +823,6 @@ def _v1_fetch_diagnostics_from_meta(fetch_meta: Optional[dict]) -> Optional[dict
         "fetched_at": fetch_meta["fetched_at"],
     }
 
-
 def build_shipments_dataframe(raw_records: list, fetch_meta: Optional[dict] = None,
                                status_counts: Optional[dict] = None) -> pd.DataFrame:
     """Pure mapping: raw admin-API shipment dicts -> the same ARCHIVE_COLUMNS
@@ -968,12 +841,6 @@ def build_shipments_dataframe(raw_records: list, fetch_meta: Optional[dict] = No
         courier_name = courier_obj.get("name") or "Unassigned"
         courier_phone = courier_obj.get("phone")
 
-        # Unchanged semantics, confirmed with the business (2026-07-15):
-        # "received_at"/"delivered_at" stay the TARGET dates
-        # (date_to_receive_shipment / date_to_deliver_shipment), not the
-        # real delivered_date_at now available — switching would change
-        # what delivery_hours measures, which is out of scope for this
-        # migration (data source only, not calculations).
         received_raw = s.get("date_to_receive_shipment")
         delivered_raw = s.get("date_to_deliver_shipment")
         order_date = received_raw or delivered_raw
@@ -985,7 +852,7 @@ def build_shipments_dataframe(raw_records: list, fetch_meta: Optional[dict] = No
         rows.append({
             "phone_number": s.get("client_phone"),
             "shipment_id": s.get("id") or s.get("barcode"),
-            "product_name": None,  # not present in the payload
+            "product_name": None,
             "merchant_name": merchant_name,
             "courier_name": courier_name,
             "courier_phone": courier_phone,
@@ -1014,14 +881,6 @@ def build_shipments_dataframe(raw_records: list, fetch_meta: Optional[dict] = No
 
     df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
-    # FINDING 2 FIX (2026-07-17): used to unconditionally drop any shipment
-    # missing BOTH date_to_receive_shipment and date_to_deliver_shipment via
-    # df.dropna(subset=["delivery_date"]) — applied to every status, even
-    # with no date filter active, silently shrinking Total Orders/status
-    # breakdown below what the server actually returned. Removed: rows with
-    # a NaT delivery_date are kept (they just don't participate in the
-    # date-based views below, which already skip NaT safely via pandas'
-    # default skipna behavior in resample/max/min/comparisons/sort_values).
 
     df["received_at"] = pd.to_datetime(df["received_at"], errors="coerce")
     df["delivered_at"] = pd.to_datetime(df["delivered_at"], errors="coerce")
@@ -1039,7 +898,6 @@ def build_shipments_dataframe(raw_records: list, fetch_meta: Optional[dict] = No
     if status_counts is not None:
         df.attrs["status_counts"] = status_counts
     return df
-
 
 def load_real_shipments_from_admin_api(api_key: str, base_url: str = WEEVO_API_BASE_URL,
                                         start_date: Optional[str] = None,
@@ -1063,10 +921,6 @@ def load_real_shipments_from_admin_api(api_key: str, base_url: str = WEEVO_API_B
     )
     return build_shipments_dataframe(records, fetch_meta=fetch_meta, status_counts=status_counts)
 
-
-# ---------------------------------------------------------------------------
-# Real data loader — local DB cache (secondary / fallback source)
-# ---------------------------------------------------------------------------
 def load_real_shipments(db_path: str = "./weevo_chatbot.db") -> pd.DataFrame:
     """
     Reads scheduler_shipment_data as-is. Synchronous sqlite3 (read-only) is
@@ -1102,20 +956,12 @@ def load_real_shipments(db_path: str = "./weevo_chatbot.db") -> pd.DataFrame:
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
     df["area"] = df["delivery_address"].apply(detect_area)
 
-    # This source has no receive/deliver timestamp pair (only a single
-    # delivery_date) — keep the columns present but empty so downstream
-    # delivery-time functions can detect "not available" instead of
-    # erroring on a missing column.
     df["received_at"] = pd.NaT
     df["delivered_at"] = pd.NaT
     df["delivery_hours"] = pd.NA
     df["delivery_hours"] = pd.to_numeric(df["delivery_hours"], errors="coerce")
     return df
 
-
-# ---------------------------------------------------------------------------
-# Mock data generator — clearly labeled, structurally identical to real data
-# ---------------------------------------------------------------------------
 _MOCK_MERCHANTS = [
     "Cairo Kicks Store", "Bella Home Decor", "TechZone Electronics",
     "Nour Beauty Supplies", "Fresh Cart Grocery", "Al Rayan Fashion",
@@ -1126,11 +972,7 @@ _MOCK_COURIERS = [
     "Karim Fathy", "Mahmoud Saeed", "Hassan Nabil",
 ]
 _MOCK_AREAS = list(AREA_KEYWORDS.keys())[:8] or ["New Cairo", "Nasr City", "Maadi"]
-# A few couriers deliberately slower in the demo, purely so the new
-# delivery-time section has visible signal to show — has zero effect on
-# any of the original mock fields/columns above.
 _MOCK_SLOW_COURIERS = {"Karim Fathy", "Hassan Nabil"}
-
 
 def generate_mock_shipments(n: int = 1800, days_back: int = 60, seed: int = 42) -> pd.DataFrame:
     """
@@ -1143,23 +985,17 @@ def generate_mock_shipments(n: int = 1800, days_back: int = 60, seed: int = 42) 
     rows = []
     today = datetime.now()
 
-    # give merchants and couriers uneven activity so "top" lists look real
     merchant_weights = [rng.uniform(0.3, 3.0) for _ in _MOCK_MERCHANTS]
     courier_weights = [rng.uniform(0.5, 2.5) for _ in _MOCK_COURIERS]
 
     for i in range(n):
-        days_ago = rng.betavariate(1.6, 3.2) * days_back  # skew toward recent
+        days_ago = rng.betavariate(1.6, 3.2) * days_back
         delivery_date = today - timedelta(days=days_ago)
         merchant = rng.choices(_MOCK_MERCHANTS, weights=merchant_weights)[0]
         courier = rng.choices(_MOCK_COURIERS, weights=courier_weights)[0]
         area = rng.choice(_MOCK_AREAS)
         amount = round(rng.uniform(120, 2400), 2)
 
-        # Additive-only: received_at/delivered_at/delivery_hours simulate
-        # what the real API's date_to_receive_shipment / date_to_deliver_shipment
-        # pair looks like once a shipment is delivered. ~85% of mock rows are
-        # "delivered" (have both timestamps); the rest simulate in-progress
-        # shipments with only a receive time, matching the real data shape.
         received_at = delivery_date - timedelta(hours=rng.uniform(0.5, 3))
         is_delivered = rng.random() < 0.85
         base_hours = rng.uniform(1.0, 2.6)
@@ -1209,21 +1045,12 @@ def generate_mock_shipments(n: int = 1800, days_back: int = 60, seed: int = 42) 
     df["delivery_hours"] = pd.to_numeric(df["delivery_hours"], errors="coerce")
     return df
 
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
 def load_shipments(
     source: str = "mock",
     api_key: Optional[str] = None,
     base_url: str = WEEVO_API_BASE_URL,
     db_path: str = "./weevo_chatbot.db",
-    # kept for backward compatibility with earlier calls:
     use_mock_data: Optional[bool] = None,
-    # ADDED (2026-07-15 admin-API migration): only used when source="api".
-    # "YYYY-MM-DD" strings or None. None/None ("no range given") resolves
-    # to the last 30 days inside load_real_shipments_from_admin_api below
-    # (2026-07-17 default-date fix) — never an unbounded all-history fetch.
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> pd.DataFrame:
@@ -1248,12 +1075,6 @@ def load_shipments(
     else:
         return generate_mock_shipments()
 
-
-# ---------------------------------------------------------------------------
-# Aggregations — every one of these only uses fields confirmed to exist.
-# No "rating" or "delivery duration" metric is computed anywhere, because
-# neither field exists in scheduler_shipment_data today (see module docstring).
-# ---------------------------------------------------------------------------
 def orders_over_time(df: pd.DataFrame, granularity: str = "D") -> pd.DataFrame:
     """granularity: 'D' daily, 'W' weekly, 'M' monthly."""
     if df.empty:
@@ -1267,7 +1088,6 @@ def orders_over_time(df: pd.DataFrame, granularity: str = "D") -> pd.DataFrame:
     )
     return grouped
 
-
 def status_breakdown(df: pd.DataFrame) -> pd.DataFrame:
     """Every status present in the loaded window, with count and share of
     total — the actual composition behind the single 'Total orders' KPI
@@ -1278,7 +1098,6 @@ def status_breakdown(df: pd.DataFrame) -> pd.DataFrame:
     counts.columns = ["status", "orders"]
     counts["pct"] = round(counts["orders"] / counts["orders"].sum() * 100, 1)
     return counts.sort_values("orders", ascending=False).reset_index(drop=True)
-
 
 def top_areas(df: pd.DataFrame, n: int = 10, ascending: bool = False) -> pd.DataFrame:
     """
@@ -1311,7 +1130,6 @@ def top_areas(df: pd.DataFrame, n: int = 10, ascending: bool = False) -> pd.Data
     result.attrs["excluded_unknown_count"] = excluded_count
     return result
 
-
 def courier_leaderboard(df: pd.DataFrame, n: int = 15, ascending: bool = False) -> pd.DataFrame:
     """
     Order count + total handled value per courier. Does NOT include
@@ -1341,7 +1159,6 @@ def courier_leaderboard(df: pd.DataFrame, n: int = 15, ascending: bool = False) 
     )
     result.attrs["excluded_unassigned_count"] = excluded_count
     return result
-
 
 def merchant_activity(df: pd.DataFrame, recent_days: int = 7, compare_days: int = 7) -> pd.DataFrame:
     """
@@ -1406,7 +1223,6 @@ def merchant_activity(df: pd.DataFrame, recent_days: int = 7, compare_days: int 
     result.attrs["excluded_unknown_count"] = excluded_count
     return result
 
-
 def merchant_leaderboard(df: pd.DataFrame, n: int = 10, ascending: bool = False) -> pd.DataFrame:
     """
     Total orders + total revenue per merchant, all-time within the loaded
@@ -1437,7 +1253,6 @@ def merchant_leaderboard(df: pd.DataFrame, n: int = 10, ascending: bool = False)
     result.attrs["excluded_unknown_count"] = excluded_count
     return result
 
-
 def merchants_with_zero_orders(full_roster_df: pd.DataFrame, shipments_df: pd.DataFrame) -> pd.DataFrame:
     """
     True 'inactive merchants' — registered with Weevo but with ZERO orders
@@ -1460,14 +1275,12 @@ def merchants_with_zero_orders(full_roster_df: pd.DataFrame, shipments_df: pd.Da
     if not shipments_df.empty and "merchant_id" in shipments_df.columns:
         active_ids = set(shipments_df["merchant_id"].dropna().unique())
     elif not shipments_df.empty and "merchant_name" in shipments_df.columns:
-        # v1's DataFrame has no merchant_id — fall back to matching by name
         active_names = set(shipments_df["merchant_name"].dropna().unique())
         roster = full_roster_df.rename(columns={name_col: "merchant_name", id_col: "merchant_id"})
         return roster[~roster["merchant_name"].isin(active_names)][["merchant_name", "merchant_id"]].reset_index(drop=True)
 
     roster = full_roster_df.rename(columns={name_col: "merchant_name", id_col: "merchant_id"})
     return roster[~roster["merchant_id"].isin(active_ids)][["merchant_name", "merchant_id"]].reset_index(drop=True)
-
 
 def recent_orders(df: pd.DataFrame, n: int = 15) -> pd.DataFrame:
     """Most recent shipments, for a live-feed-style table."""
@@ -1479,7 +1292,6 @@ def recent_orders(df: pd.DataFrame, n: int = 15) -> pd.DataFrame:
         .head(n)
         .reset_index(drop=True)
     )
-
 
 def _authoritative_total_orders(df: pd.DataFrame) -> Optional[int]:
     """FINDING 5 FIX (2026-07-17): the admin API's own `statusCounts.Total`
@@ -1501,7 +1313,6 @@ def _authoritative_total_orders(df: pd.DataFrame) -> Optional[int]:
     except (TypeError, ValueError):
         return None
 
-
 def summary_kpis(df: pd.DataFrame) -> dict:
     api_total_orders = _authoritative_total_orders(df)
     if df.empty:
@@ -1510,10 +1321,6 @@ def summary_kpis(df: pd.DataFrame) -> dict:
                 "active_couriers": 0, "merchants_at_risk": 0}
     ma = merchant_activity(df)
     at_risk = int((ma["status"] == "Declining").sum()) if not ma.empty else 0
-    # "Unassigned" / "Unknown" are placeholders for shipments with no real
-    # courier/merchant on record yet — not counted as if they were one,
-    # otherwise every KPI here is inflated by +1 the moment a single
-    # shipment lacks that field (which is normal for e.g. "available" status).
     real_couriers = df.loc[df["courier_name"] != "Unassigned", "courier_name"]
     real_merchants = df.loc[df["merchant_name"] != "Unknown", "merchant_name"]
     return {
@@ -1524,21 +1331,12 @@ def summary_kpis(df: pd.DataFrame) -> dict:
         "merchants_at_risk": at_risk,
     }
 
-
-# ---------------------------------------------------------------------------
-# Delivery-time metrics (ADDED — uses date_to_receive_shipment /
-# date_to_deliver_shipment from the live API). Every function here degrades
-# gracefully to an empty result when delivery_hours isn't available (e.g.
-# db-cache source, or a demo run with no delivered orders yet) rather than
-# raising, so nothing above breaks regardless of data source.
-# ---------------------------------------------------------------------------
 def _has_delivery_time_data(df: pd.DataFrame) -> bool:
     return (
         not df.empty
         and "delivery_hours" in df.columns
         and df["delivery_hours"].notna().any()
     )
-
 
 def delivery_time_overview(df: pd.DataFrame, target_hours: float = 2.0) -> dict:
     """Headline delivery-time numbers, incl. how many deliveries met the
@@ -1557,7 +1355,6 @@ def delivery_time_overview(df: pd.DataFrame, target_hours: float = 2.0) -> dict:
         "based_on_orders": int(len(valid)),
     }
 
-
 def delivery_time_by_courier(df: pd.DataFrame, n: int = 15) -> pd.DataFrame:
     """Avg/median delivery time per courier, delivered orders only."""
     if not _has_delivery_time_data(df):
@@ -1571,7 +1368,6 @@ def delivery_time_by_courier(df: pd.DataFrame, n: int = 15) -> pd.DataFrame:
     result["avg_hours"] = result["avg_hours"].round(2)
     result["median_hours"] = result["median_hours"].round(2)
     return result.sort_values("avg_hours").head(n)
-
 
 def delivery_time_by_area(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     """
@@ -1597,13 +1393,6 @@ def delivery_time_by_area(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     result.attrs["excluded_unknown_count"] = excluded_count
     return result
 
-
-# ---------------------------------------------------------------------------
-# Snapshot archive (ADDED) — lets end-of-day/week/month snapshots accumulate
-# into real historical data on disk, instead of only ever seeing whatever
-# window the Live API currently returns. Pure pandas + stdlib csv/os only —
-# no new dependency.
-# ---------------------------------------------------------------------------
 def _empty_archive_df() -> pd.DataFrame:
     df = pd.DataFrame(columns=ARCHIVE_COLUMNS)
     for col in ("delivery_date", "received_at", "delivered_at"):
@@ -1611,7 +1400,6 @@ def _empty_archive_df() -> pd.DataFrame:
     for col in ("amount", "attempts", "delivery_hours"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
-
 
 def get_archive_file_info(archive_path: str = DEFAULT_ARCHIVE_PATH) -> dict:
     """Reports the archive file's actual state on disk right now — the
@@ -1638,7 +1426,6 @@ def get_archive_file_info(archive_path: str = DEFAULT_ARCHIVE_PATH) -> dict:
         "row_count": len(load_archive(archive_path)),
     }
 
-
 def load_archive(archive_path: str = DEFAULT_ARCHIVE_PATH) -> pd.DataFrame:
     """Reads whatever has been saved so far. Returns an empty (but
     correctly-shaped) DataFrame if nothing has been archived yet — this is
@@ -1653,13 +1440,10 @@ def load_archive(archive_path: str = DEFAULT_ARCHIVE_PATH) -> pd.DataFrame:
     for col in ("amount", "attempts", "delivery_hours"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    # Any archive column missing from an older file version is added back
-    # empty, so downstream aggregation functions never hit a KeyError.
     for col in ARCHIVE_COLUMNS:
         if col not in df.columns:
             df[col] = pd.NA
     return df[ARCHIVE_COLUMNS]
-
 
 def append_to_archive(df: pd.DataFrame, archive_path: str = DEFAULT_ARCHIVE_PATH) -> dict:
     """Merges `df` into the on-disk archive. Shipments already in the
@@ -1685,16 +1469,11 @@ def append_to_archive(df: pd.DataFrame, archive_path: str = DEFAULT_ARCHIVE_PATH
     frames = [f for f in (existing, incoming) if not f.empty and not f.isna().all(axis=None)]
     combined = pd.concat(frames, ignore_index=True) if frames else incoming
     combined = combined.drop_duplicates(subset=["shipment_id"], keep="last")
-    # Sorted chronologically purely for readability if someone opens the
-    # raw CSV directly — has zero effect on any dashboard calculation,
-    # since every aggregation here groups/resamples rather than relying
-    # on row order.
     if "delivery_date" in combined.columns:
         combined = combined.sort_values("delivery_date", na_position="last").reset_index(drop=True)
     combined.to_csv(archive_path, index=False)
 
     return {"added": added_count, "updated": updated_count, "total_in_archive": len(combined)}
-
 
 def detect_archive_gap(archive_df: pd.DataFrame, live_df: pd.DataFrame) -> dict:
     """
@@ -1729,7 +1508,7 @@ def detect_archive_gap(archive_df: pd.DataFrame, live_df: pd.DataFrame) -> dict:
                 "live_oldest": None, "reason": "missing_dates"}
 
     gap_hours = (live_oldest - archive_latest).total_seconds() / 3600
-    has_gap = gap_hours > 0.05  # ignore sub-3-minute float/measurement noise around zero
+    has_gap = gap_hours > 0.05
 
     return {
         "has_gap": bool(has_gap),
@@ -1738,7 +1517,6 @@ def detect_archive_gap(archive_df: pd.DataFrame, live_df: pd.DataFrame) -> dict:
         "live_oldest": live_oldest,
         "reason": "gap_detected" if has_gap else "no_gap",
     }
-
 
 def load_uploaded_csv(uploaded_file) -> pd.DataFrame:
     """Parses a snapshot CSV a user uploads (normally one previously
