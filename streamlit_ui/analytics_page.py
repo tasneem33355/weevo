@@ -68,6 +68,8 @@ from app.services.analytics_pipeline_v2 import (
     get_shift_progress,
     courier_shift_risk,
     courier_shift_risk_summary,
+    courier_performance_by_period,
+    courier_performance_summary,
     stale_open_shipments,
     STALE_OPEN_SHIPMENT_DAYS,
     fetch_merchants,
@@ -568,11 +570,11 @@ def render_analytics_page():
         granularity_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
 
     date_col = df_all.loc[
-        df_all["status"].isin(DATED_STATUSES), "delivery_date"
-    ].dropna() if "status" in df_all.columns else df_all["delivery_date"].dropna()
+        df_all["status"].isin(DATED_STATUSES), "created_at"
+    ].dropna() if "status" in df_all.columns else df_all["created_at"].dropna()
     dcol1, dcol2 = st.columns([1, 2])
     date_range = None
-    if date_col.empty and not df_all["delivery_date"].dropna().empty:
+    if date_col.empty and not df_all["created_at"].dropna().empty:
         st.caption(
             "Date range filter isn't available — no delivered/returned orders are "
             "loaded yet to anchor it to (only in-flight orders, whose dates are "
@@ -858,7 +860,7 @@ def render_analytics_page():
         st.dataframe(
             ro.rename(columns={
                 "shipment_id": "Order ID", "merchant_name": "Merchant", "courier_name": "Courier",
-                "area": "Area", "amount": "Amount (EGP)", "delivery_date": "Date",
+                "area": "Area", "amount": "Amount (EGP)", "created_at": "Date",
             }),
             use_container_width=True, hide_index=True, height=300,
             column_config={
@@ -1183,136 +1185,182 @@ def render_analytics_page():
                     st.caption("No shipments with both a creation and completion timestamp yet.")
 
             st.markdown("<br>", unsafe_allow_html=True)
-            shift = get_shift_progress()
-            if not shift["active"] and shift["now"] < shift["shift_start"]:
-                st.caption(
-                    f"No active shift right now — shifts run "
-                    f"{shift['shift_start'].strftime('%-I:%M %p')}–{shift['shift_end'].strftime('%-I:%M %p')}."
-                )
+            st.markdown('<p class="wa-section-title" style="font-size:14px;">Courier performance (selected period)</p>', unsafe_allow_html=True)
+
+            if date_range and len(date_range) == 2:
+                _perf_start, _perf_end = date_range
+            elif v2_min_date and v2_max_date:
+                _perf_start, _perf_end = v2_min_date, v2_max_date
             else:
-                if v2_from_archive:
-                    cs_source = df_v2
-                else:
-                    _cs_end = shift["now"].strftime("%Y-%m-%d")
-                    _cs_start = (shift["now"] - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-                    cs_source = _cached_v2_load(api_key, start_date=_cs_start, end_date=_cs_end)
-                    if not cs_source.empty:
-                        if selected_areas:
-                            cs_source = cs_source[cs_source["area"].isin(selected_areas)]
-                        if selected_merchants:
-                            cs_source = cs_source[cs_source["merchant_name"].isin(selected_merchants)]
-                cs_risk = courier_shift_risk(cs_source, now=shift["now"])
-                shift_status = "in progress" if shift["active"] else "ended"
-                st.markdown(
-                    f'<p class="wa-section-sub" style="margin-bottom:10px;">'
-                    f'Shift {shift_status}: {shift["elapsed_pct"]:.0f}% elapsed '
-                    f'({shift["elapsed_hours"]:.1f}h of a {shift["shift_length_hours"]:.0f}h shift, '
-                    f'{shift["shift_start"].strftime("%-I:%M %p")}–{shift["shift_end"].strftime("%-I:%M %p")}). '
-                    f'Risk compares each courier\'s share of today\'s workload actually closed out '
-                    f'(delivered or returned) against how much of the shift has elapsed — not against '
-                    f'any editable target date.</p>',
-                    unsafe_allow_html=True,
-                )
-                if v2_date_filter_active:
-                    st.caption(
-                        "ℹ️ 'Closed today' and 'Remaining' both only count shipments *created* today — a "
-                        "shipment created before today (whether it's still open or was delivered/returned "
-                        "today) won't appear in either column here. See 'Open shipments not yet resolved' "
-                        "below for older open shipments. This section always checks today regardless of the "
-                        "Date range selected above."
-                    )
+                _perf_start, _perf_end = None, None
 
-                if cs_risk.empty:
-                    st.success("✅ No courier activity to assess yet this shift.")
+            if _perf_start is None:
+                st.caption("No date range available to assess courier performance against yet.")
+            else:
+                perf = courier_performance_by_period(df_v2, start_date=_perf_start, end_date=_perf_end)
+                if perf["by_courier"].empty:
+                    st.success("✅ No courier activity in the selected period.")
                 else:
-                    summary = courier_shift_risk_summary(cs_risk)
-                    if summary["overdue"] > 0 or summary["at_risk"] > 0:
+                    psummary = courier_performance_summary(perf)
+                    if psummary["couriers_with_carryover"] > 0:
                         st.markdown(
-                            f'<div class="wa-alert-banner">⚠️ {summary["overdue"] + summary["at_risk"]} '
-                            f'courier(s) are behind pace for this shift '
-                            f'({summary["overdue"]} overdue, {summary["at_risk"]} at risk), '
-                            f'{summary["total_remaining"]} order(s) still remaining in total.</div>',
+                            f'<div class="wa-alert-banner">⚠️ {psummary["couriers_with_carryover"]} '
+                            f'courier(s) had at least one order carried over past its creation day in '
+                            f'this period ({psummary["total_carried_over"]} order(s) total).</div>',
                             unsafe_allow_html=True,
                         )
 
-                    kpi_cols = st.columns(4)
-                    kpi_data = [
-                        ("🟢 Healthy", summary["healthy"], "#0F6E56"),
-                        ("🟡 Watch", summary["watch"], "#854F0B"),
-                        ("🔴 At risk", summary["at_risk"], "#A32D2D"),
-                        ("🔴 Overdue", summary["overdue"], "#7A1F1F"),
-                    ]
-                    for col, (label, count, color) in zip(kpi_cols, kpi_data):
-                        with col:
-                            st.markdown(
-                                f'<div class="wa-kpi"><div class="wa-kpi-label">{label}</div>'
-                                f'<div class="wa-kpi-value" style="color:{color};">{count}</div></div>',
-                                unsafe_allow_html=True,
+                    today_info = perf["today"]
+                    if today_info is not None and today_info["active"]:
+                        st.markdown(
+                            f'<p class="wa-section-sub" style="margin-bottom:10px;">'
+                            f'Today so far: {today_info["elapsed_pct"]:.0f}% of today\'s shift elapsed '
+                            f'({today_info["elapsed_hours"]:.1f}h of {today_info["shift_length_hours"]:.0f}h, '
+                            f'{today_info["shift_start"].strftime("%-I:%M %p")}–{today_info["shift_end"].strftime("%-I:%M %p")}). '
+                            f"Risk below compares each courier's share of today's workload actually closed out "
+                            f"against how much of today's shift has elapsed — not against any editable target "
+                            f"date. Other days in the selected period are already over, so they're shown as a "
+                            f"plain carried-over count instead (no pacing).</p>",
+                            unsafe_allow_html=True,
+                        )
+                        if not today_info["risk"].empty:
+                            t_counts = today_info["risk"]["risk_level"].value_counts()
+                            kpi_cols = st.columns(4)
+                            kpi_data = [
+                                ("🟢 Healthy (today)", int(t_counts.get("🟢 Healthy", 0)), "#0F6E56"),
+                                ("🟡 Watch (today)", int(t_counts.get("🟡 Watch", 0)), "#854F0B"),
+                                ("🔴 At risk (today)", int(t_counts.get("🔴 At risk", 0)), "#A32D2D"),
+                                ("🔴 Overdue (today)", int(t_counts.get("🔴 Overdue", 0)), "#7A1F1F"),
+                            ]
+                            for col, (label, count, color) in zip(kpi_cols, kpi_data):
+                                with col:
+                                    st.markdown(
+                                        f'<div class="wa-kpi"><div class="wa-kpi-label">{label}</div>'
+                                        f'<div class="wa-kpi-value" style="color:{color};">{count}</div></div>',
+                                        unsafe_allow_html=True,
+                                    )
+
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            st.markdown('<p class="wa-section-title" style="font-size:13px;">Today\'s shift detail</p>', unsafe_allow_html=True)
+                            rows_html = ""
+                            for _, row in today_info["risk"].iterrows():
+                                text_color, bg_color = RISK_STYLE.get(row["risk_level"], ("#444", "#eee"))
+                                rows_html += _clean(f"""
+                                <tr style="border-bottom:1px solid {BORDER};">
+                                    <td style="padding:8px 6px; font-size:13px;">{row['courier_name']}</td>
+                                    <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['delivered_today']}</td>
+                                    <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['returned_today']}</td>
+                                    <td style="padding:8px 6px; font-size:13px; text-align:right; font-weight:600;">{row['completed_today']}</td>
+                                    <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['remaining']}</td>
+                                    <td style="padding:8px 6px; font-size:13px; text-align:right; color:{MUTED};">{row['actual_progress_pct']:.0f}% vs {row['expected_progress_pct']:.0f}% expected</td>
+                                    <td style="padding:8px 6px; text-align:right;">
+                                        <span class="wa-badge" style="color:{text_color}; background:{bg_color};">{row['risk_level']}</span>
+                                    </td>
+                                </tr>""")
+                            table_html = _clean(f"""
+                            <table style="width:100%; border-collapse:collapse;">
+                                <thead>
+                                    <tr style="border-bottom:2px solid {BORDER};">
+                                        <th style="text-align:left; padding:6px; font-size:12px; color:{MUTED};">Courier</th>
+                                        <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Delivered today</th>
+                                        <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Returned today</th>
+                                        <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Closed today</th>
+                                        <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Remaining</th>
+                                        <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Progress</th>
+                                        <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Risk</th>
+                                    </tr>
+                                </thead>
+                                <tbody>{rows_html}</tbody>
+                            </table>
+                            """)
+                            st.markdown(table_html, unsafe_allow_html=True)
+                            st.caption(
+                                "'Closed today' = delivered or returned today (delivered_date_at / returned_date_at). "
+                                "'Remaining' = created today and not yet delivered/returned/cancelled. 'Progress' "
+                                "compares this courier's own closed-vs-remaining share against how much of today's "
+                                "5 PM–11 PM shift has elapsed — the same expected % for every courier."
                             )
+                    elif today_info is not None and not today_info["active"]:
+                        st.caption(
+                            f"Today so far: no active shift right now — shifts run "
+                            f"{today_info['shift_start'].strftime('%-I:%M %p')}–{today_info['shift_end'].strftime('%-I:%M %p')}. "
+                            f"Today's orders are folded into the period totals below."
+                        )
 
                     st.markdown("<br>", unsafe_allow_html=True)
-                    dist_col, scatter_col = st.columns(2)
-                    with dist_col:
-                        st.markdown('<p class="wa-section-title" style="font-size:13px;">Couriers by risk level</p>', unsafe_allow_html=True)
-                        dist_df = (
-                            cs_risk["risk_level"].value_counts()
-                            .reindex(["🟢 Healthy", "🟡 Watch", "🔴 At risk", "🔴 Overdue"])
-                            .fillna(0).astype(int)
-                            .rename_axis("risk_level").reset_index(name="couriers")
-                        )
-                        st.bar_chart(dist_df.set_index("risk_level")[["couriers"]], y="couriers", color=RED, height=220)
-                    with scatter_col:
-                        st.markdown(
-                            '<p class="wa-section-title" style="font-size:13px;">Delivered/returned vs. remaining, per courier</p>',
-                            unsafe_allow_html=True,
-                        )
-                        st.scatter_chart(
-                            cs_risk.rename(columns={"completed_today": "Closed today", "remaining": "Remaining"}),
-                            x="Closed today", y="Remaining", color=RED, height=220,
-                        )
-                        st.caption("A courier high on 'Remaining' but low on 'Closed today' is the pattern worth checking in on.")
-
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    st.markdown('<p class="wa-section-title" style="font-size:13px;">Courier shift detail</p>', unsafe_allow_html=True)
+                    st.markdown(
+                        '<p class="wa-section-title" style="font-size:13px;">Courier totals for the selected period</p>'
+                        '<p class="wa-section-sub">Assigned = orders created in this period, per courier. '
+                        'Closed same-day = delivered or returned the same day they were created. Carried over = '
+                        'resolved on a later day, or still open — worth checking in on, since a low same-day '
+                        'closure rate isn\'t necessarily this instant\'s pace, it\'s the whole period\'s.</p>',
+                        unsafe_allow_html=True,
+                    )
                     rows_html = ""
-                    for _, row in cs_risk.iterrows():
-                        text_color, bg_color = RISK_STYLE.get(row["risk_level"], ("#444", "#eee"))
+                    for _, row in perf["by_courier"].iterrows():
                         rows_html += _clean(f"""
                         <tr style="border-bottom:1px solid {BORDER};">
                             <td style="padding:8px 6px; font-size:13px;">{row['courier_name']}</td>
-                            <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['delivered_today']}</td>
-                            <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['returned_today']}</td>
-                            <td style="padding:8px 6px; font-size:13px; text-align:right; font-weight:600;">{row['completed_today']}</td>
-                            <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['remaining']}</td>
-                            <td style="padding:8px 6px; font-size:13px; text-align:right; color:{MUTED};">{row['actual_progress_pct']:.0f}% vs {row['expected_progress_pct']:.0f}% expected</td>
-                            <td style="padding:8px 6px; text-align:right;">
-                                <span class="wa-badge" style="color:{text_color}; background:{bg_color};">{row['risk_level']}</span>
-                            </td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['assigned']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['closed_same_day']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right; font-weight:600;">{row['carried_over']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right; color:{MUTED};">{row['closure_rate_pct']:.0f}%</td>
                         </tr>""")
                     table_html = _clean(f"""
                     <table style="width:100%; border-collapse:collapse;">
                         <thead>
                             <tr style="border-bottom:2px solid {BORDER};">
                                 <th style="text-align:left; padding:6px; font-size:12px; color:{MUTED};">Courier</th>
-                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Delivered today</th>
-                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Returned today</th>
-                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Closed today</th>
-                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Remaining</th>
-                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Progress</th>
-                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Risk</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Assigned</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Closed same-day</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Carried over</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Same-day closure rate</th>
                             </tr>
                         </thead>
                         <tbody>{rows_html}</tbody>
                     </table>
                     """)
                     st.markdown(table_html, unsafe_allow_html=True)
-                    st.caption(
-                        "'Closed today' = delivered or returned today (delivered_date_at / returned_date_at). "
-                        "'Remaining' = currently assigned to this courier, created today, and not yet "
-                        "delivered/returned/cancelled. 'Progress' compares this courier's own closed-vs-remaining "
-                        "share against how much of the 5 PM–11 PM shift has elapsed — the same expected % for "
-                        "every courier."
-                    )
+
+                    if perf["show_daily_table"] and not perf["daily"].empty:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown('<p class="wa-section-title" style="font-size:13px;">Daily breakdown</p>', unsafe_allow_html=True)
+                        daily_display = perf["daily"].rename(columns={
+                            "date": "Date", "courier_name": "Courier", "assigned": "Assigned",
+                            "closed_same_day": "Closed same-day", "carried_over": "Carried over",
+                        })
+                        st.dataframe(daily_display, use_container_width=True, hide_index=True, height=320)
+                    elif not perf["trend"].empty:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown(
+                            f'<p class="wa-section-title" style="font-size:13px;">Assigned vs. closed same-day over time</p>'
+                            f'<p class="wa-section-sub">Period is {perf["span_days"]} days — too long for a daily '
+                            f'table, showing the trend instead.</p>',
+                            unsafe_allow_html=True,
+                        )
+                        trend_col1, trend_col2 = st.columns(2)
+                        with trend_col1:
+                            st.markdown('<p class="wa-section-title" style="font-size:13px;">Assigned</p>', unsafe_allow_html=True)
+                            st.bar_chart(perf["trend"].set_index("date")[["assigned"]], y="assigned", color=PURPLE, height=220)
+                        with trend_col2:
+                            st.markdown('<p class="wa-section-title" style="font-size:13px;">Closed same-day</p>', unsafe_allow_html=True)
+                            st.bar_chart(perf["trend"].set_index("date")[["closed_same_day"]], y="closed_same_day", color=TEAL, height=220)
+
+                    if not perf["by_area"].empty:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        best_areas = perf["by_area"].head(5)
+                        worst_areas = perf["by_area"].sort_values("closure_rate_pct").head(5)
+                        area_col1, area_col2 = st.columns(2)
+                        with area_col1:
+                            st.markdown('<p class="wa-section-title" style="font-size:13px;">Best same-day closure — areas</p>', unsafe_allow_html=True)
+                            st.bar_chart(best_areas.set_index("area")[["closure_rate_pct"]], y="closure_rate_pct", color=TEAL, height=220)
+                        with area_col2:
+                            st.markdown('<p class="wa-section-title" style="font-size:13px;">Worst same-day closure — areas</p>', unsafe_allow_html=True)
+                            st.bar_chart(worst_areas.set_index("area")[["closure_rate_pct"]], y="closure_rate_pct", color=RED, height=220)
+                        st.caption(
+                            "Same-day closure rate = % of orders created in an area during the selected period "
+                            "that were delivered or returned the same day. 'Unknown' addresses excluded."
+                        )
 
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown(
