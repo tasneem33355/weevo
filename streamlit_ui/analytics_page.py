@@ -410,51 +410,6 @@ def render_analytics_page():
     for ok, msg in upload_messages:
         (st.success if ok else st.error)(msg)
 
-    IN_FLIGHT_PLAUSIBLE_PAST_DAYS = 45
-    IN_FLIGHT_PLAUSIBLE_FUTURE_DAYS = 14
-
-    def _plausible_in_flight_mask(dates: pd.Series) -> pd.Series:
-        now = pd.Timestamp.now()
-        lower = now - pd.Timedelta(days=IN_FLIGHT_PLAUSIBLE_PAST_DAYS)
-        upper = now + pd.Timedelta(days=IN_FLIGHT_PLAUSIBLE_FUTURE_DAYS)
-        return dates.between(lower, upper)
-
-    if not df_all.empty and "delivery_date" in df_all.columns and df_all["delivery_date"].notna().any():
-        heavy_mask = df_all["status"].isin(["delivered", "returned"]) if "status" in df_all.columns else pd.Series(False, index=df_all.index)
-        heavy_df, light_df = df_all[heavy_mask], df_all[~heavy_mask]
-        coverage_bits = []
-        stale_note = ""
-        if not heavy_df.empty:
-            coverage_bits.append(
-                f"delivered/returned: {heavy_df['delivery_date'].min():%d %b} → "
-                f"{heavy_df['delivery_date'].max():%d %b} ({len(heavy_df):,} orders)"
-            )
-        if not light_df.empty:
-            plausible_mask = _plausible_in_flight_mask(light_df["delivery_date"])
-            plausible_light = light_df[plausible_mask]
-            stale_count = int((~plausible_mask).sum())
-            if not plausible_light.empty:
-                coverage_bits.append(
-                    f"in-flight statuses: {plausible_light['delivery_date'].min():%d %b} → "
-                    f"{plausible_light['delivery_date'].max():%d %b} ({len(light_df):,} orders)"
-                )
-            elif len(light_df) > 0:
-                coverage_bits.append(f"in-flight statuses: ({len(light_df):,} orders, no plausible target dates)")
-            if stale_count:
-                stale_note = (
-                    f" ⚠️ {stale_count} in-flight order(s) excluded from this date range specifically "
-                    f"for having an implausible target date (more than {IN_FLIGHT_PLAUSIBLE_PAST_DAYS} days "
-                    f"in the past or {IN_FLIGHT_PLAUSIBLE_FUTURE_DAYS} days in the future) — likely stale "
-                    f"data worth checking with the backend team. These orders still count normally "
-                    f"everywhere else on this page, just not in this date-range display."
-                )
-        if coverage_bits:
-            st.caption(
-                "📅 Data actually covers — " + " · ".join(coverage_bits)
-                + ". This is the most recent N orders per status, not a fixed calendar "
-                  "window — the span shifts with order volume." + stale_note
-            )
-
     if load_error:
         kind, detail = load_error
         st.markdown(
@@ -839,9 +794,7 @@ def render_analytics_page():
             st.markdown('<div class="wa-section">', unsafe_allow_html=True)
             st.markdown(
                 '<p class="wa-section-title">Least-active couriers</p>'
-                '<p class="wa-section-sub">Candidates for more orders routed to them, or worth checking in on. '
-                'For couriers sitting on overdue orders specifically, see "Overdue orders by courier" in '
-                'Financial Summary & Risk below.</p>',
+                '<p class="wa-section-sub">Candidates for more orders routed to them, or worth checking in on.</p>',
                 unsafe_allow_html=True,
             )
             st.dataframe(
@@ -996,11 +949,10 @@ def render_analytics_page():
     st.markdown('<div class="wa-section" id="financial-detail">', unsafe_allow_html=True)
     st.markdown(
         '<p class="wa-section-title">💰 Financial Summary & Risk</p>'
-        '<p class="wa-section-sub">Real revenue, actual pickup-to-completion time, and overdue '
-        'shipments — delivered + returned focus, in-flight statuses checked separately for risk. '
-        'Follows the same Live API / Uploaded Archive source picked in the sidebar, same as the '
-        'main section above — this used to always pull live regardless of that choice; fixed so '
-        'both sections behave consistently.</p>',
+        '<p class="wa-section-sub">Real revenue — delivered + returned focus, in-flight statuses '
+        'checked separately for risk. Follows the same Live API / Uploaded Archive source picked '
+        'in the sidebar, same as the main section above — this used to always pull live regardless '
+        'of that choice; fixed so both sections behave consistently.</p>',
         unsafe_allow_html=True,
     )
 
