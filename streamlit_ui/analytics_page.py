@@ -1589,7 +1589,30 @@ def render_analytics_page():
                     f"{shift['shift_start'].strftime('%-I:%M %p')}–{shift['shift_end'].strftime('%-I:%M %p')}."
                 )
             else:
-                cs_risk = courier_shift_risk(df_v2, now=shift["now"])
+                # BUG FIX (2026-07-20): df_v2 above is bounded by the
+                # top-level Date range picker — e.g. a Custom range not
+                # reaching today would leave this section with zero data
+                # for "today", even though the shift clock says it's
+                # running right now. This is a live daily-ops check, not a
+                # historical report, so it now always pulls an independent
+                # last-2-days window (today + yesterday, the extra day as a
+                # safety margin for any small server/client clock skew
+                # around midnight) — regardless of the Date range picked
+                # above. Same pattern as "Open shipments not yet resolved".
+                # Archive source has no date-range concept (a saved
+                # snapshot is already everything in it), reused as-is there.
+                if v2_from_archive:
+                    cs_source = df_v2
+                else:
+                    _cs_end = shift["now"].strftime("%Y-%m-%d")
+                    _cs_start = (shift["now"] - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+                    cs_source = _cached_v2_load(api_key, start_date=_cs_start, end_date=_cs_end)
+                    if not cs_source.empty:
+                        if selected_areas:
+                            cs_source = cs_source[cs_source["area"].isin(selected_areas)]
+                        if selected_merchants:
+                            cs_source = cs_source[cs_source["merchant_name"].isin(selected_merchants)]
+                cs_risk = courier_shift_risk(cs_source, now=shift["now"])
                 shift_status = "in progress" if shift["active"] else "ended"
                 st.markdown(
                     f'<p class="wa-section-sub" style="margin-bottom:10px;">'
@@ -1606,8 +1629,8 @@ def render_analytics_page():
                         "ℹ️ 'Closed today' and 'Remaining' both only count shipments *created* today — a "
                         "shipment created before today (whether it's still open or was delivered/returned "
                         "today) won't appear in either column here. See 'Open shipments not yet resolved' "
-                        "below for older open shipments. Switch the Date range to 'All time' to make sure "
-                        "today's own shipments aren't excluded by the range picked above."
+                        "below for older open shipments. This section always checks today regardless of the "
+                        "Date range selected above."
                     )
 
                 if cs_risk.empty:
