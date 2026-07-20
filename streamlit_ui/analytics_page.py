@@ -81,10 +81,9 @@ from app.services.analytics_pipeline_v2 import (
     creation_to_completion_summary,
     creation_to_completion_summary_by_status,
     creation_to_completion_by_area,
-    at_risk_shipments,
-    risk_by_courier,
-    overdue_age_buckets,
-    overdue_by_area,
+    get_shift_progress,
+    courier_shift_risk,
+    courier_shift_risk_summary,
     fetch_merchants,
     PRIMARY_STATUSES,
     DEFAULT_V2_ARCHIVE_PATH,
@@ -110,6 +109,15 @@ STATUS_STYLE = {
     "New":       ("#185FA5", "#E6F1FB", "🆕"),
     "Watch":     ("#854F0B", "#FAEEDA", "🟡"),
     "Declining": ("#A32D2D", "#FCEBEB", "🔴"),
+}
+
+# Same visual language as STATUS_STYLE above, keyed by the courier
+# shift-risk labels (which already include their own emoji prefix).
+RISK_STYLE = {
+    "🟢 Healthy":  ("#0F6E56", "#E1F5EE"),
+    "🟡 Watch":    ("#854F0B", "#FAEEDA"),
+    "🔴 At risk":  ("#A32D2D", "#FCEBEB"),
+    "🔴 Overdue":  ("#7A1F1F", "#F6D9D9"),
 }
 
 CACHE_TTL_SECONDS = 300  # 5 minutes
@@ -1562,61 +1570,133 @@ def render_analytics_page():
                 else:
                     st.caption("No shipments with both a creation and completion timestamp yet.")
 
-            # --- Risk / overdue ---------------------------------------------
+            # --- Courier shift risk -----------------------------------------
+            # Replaces the old target_deliver_at-based overdue view entirely
+            # (see analytics_pipeline_v2.courier_shift_risk docstring for why:
+            # target_deliver_at is dispatcher-editable, so a flag built on it
+            # — even as a % rather than a hard cutoff — could be pushed out of
+            # "risk" just by editing the target). This section only trusts
+            # created_at/delivered_at/returned_at/courier_id/status, none of
+            # which can be edited after the fact, compared against the fixed
+            # 5 PM–11 PM shift clock.
             st.markdown("<br>", unsafe_allow_html=True)
-            risky = at_risk_shipments(df_v2)
-            if not risky.empty:
+            shift = get_shift_progress()
+            if not shift["active"] and shift["now"] < shift["shift_start"]:
+                st.caption(
+                    f"No active shift right now — shifts run "
+                    f"{shift['shift_start'].strftime('%-I:%M %p')}–{shift['shift_end'].strftime('%-I:%M %p')}."
+                )
+            else:
+                cs_risk = courier_shift_risk(df_v2, now=shift["now"])
+                shift_status = "in progress" if shift["active"] else "ended"
                 st.markdown(
-                    f'<div class="wa-alert-banner">⚠️ {len(risky)} shipment(s) are past their '
-                    f'target delivery time and still not delivered or returned.</div>',
+                    f'<p class="wa-section-sub" style="margin-bottom:10px;">'
+                    f'Shift {shift_status}: {shift["elapsed_pct"]:.0f}% elapsed '
+                    f'({shift["elapsed_hours"]:.1f}h of a {shift["shift_length_hours"]:.0f}h shift, '
+                    f'{shift["shift_start"].strftime("%-I:%M %p")}–{shift["shift_end"].strftime("%-I:%M %p")}). '
+                    f'Risk compares each courier\'s share of today\'s workload actually closed out '
+                    f'(delivered or returned) against how much of the shift has elapsed — not against '
+                    f'any editable target date.</p>',
                     unsafe_allow_html=True,
                 )
-                rbc = risk_by_courier(df_v2)
-                risk_col1, risk_col2 = st.columns([1, 1.4])
-                with risk_col1:
-                    st.markdown('<p class="wa-section-title" style="font-size:13px;">Overdue orders by courier</p>', unsafe_allow_html=True)
-                    st.dataframe(
-                        rbc.rename(columns={"courier_name": "Courier", "overdue_orders": "Overdue orders",
-                                             "max_hours_overdue": "Most overdue (hrs)"}),
-                        use_container_width=True, hide_index=True, height=250,
-                    )
-                with risk_col2:
-                    st.markdown('<p class="wa-section-title" style="font-size:13px;">Overdue shipments</p>', unsafe_allow_html=True)
-                    st.dataframe(
-                        risky.rename(columns={
-                            "shipment_id": "Shipment", "courier_name": "Courier", "merchant_name": "Merchant",
-                            "status": "Status", "target_deliver_at": "Was due", "hours_overdue": "Hours overdue",
-                        }),
-                        use_container_width=True, hide_index=True, height=250,
+                if v2_date_filter_active:
+                    st.caption(
+                        "ℹ️ 'Closed today' counts only shipments *created* within the Date range selected "
+                        "above — a shipment created before that range but delivered/returned today won't be "
+                        "counted here. 'Remaining' is unaffected (always the current live count). Switch the "
+                        "Date range to 'All time' for the most accurate courier-risk picture."
                     )
 
-                # --- How overdue, and where (ADDED) --------------------------
-                st.markdown("<br>", unsafe_allow_html=True)
-                age_col, area_col = st.columns(2)
-                with age_col:
-                    st.markdown(
-                        '<p class="wa-section-title" style="font-size:13px;">How overdue — age breakdown</p>'
-                        '<p class="wa-section-sub">A count of "overdue" means something very different if most '
-                        'are 1 hour late vs. 3 days late</p>',
-                        unsafe_allow_html=True,
-                    )
-                    buckets = overdue_age_buckets(df_v2)
-                    if not buckets.empty:
-                        st.bar_chart(buckets.set_index("bucket")[["orders"]], y="orders", color=RED, height=220)
-                with area_col:
-                    st.markdown('<p class="wa-section-title" style="font-size:13px;">Overdue by area</p>', unsafe_allow_html=True)
-                    by_area = overdue_by_area(df_v2, n=8)
-                    if not by_area.empty:
-                        st.dataframe(
-                            by_area.rename(columns={"area": "Area", "overdue_orders": "Overdue orders"}),
-                            use_container_width=True, hide_index=True, height=220,
+                if cs_risk.empty:
+                    st.success("✅ No courier activity to assess yet this shift.")
+                else:
+                    summary = courier_shift_risk_summary(cs_risk)
+                    if summary["overdue"] > 0 or summary["at_risk"] > 0:
+                        st.markdown(
+                            f'<div class="wa-alert-banner">⚠️ {summary["overdue"] + summary["at_risk"]} '
+                            f'courier(s) are behind pace for this shift '
+                            f'({summary["overdue"]} overdue, {summary["at_risk"]} at risk), '
+                            f'{summary["total_remaining"]} order(s) still remaining in total.</div>',
+                            unsafe_allow_html=True,
                         )
-                        st.caption("A single area overdue across many different couriers usually points to a "
-                                   "traffic/distance/access issue there rather than individual courier performance.")
-                    else:
-                        st.caption("Area not available on these overdue shipments.")
-            else:
-                st.success("✅ No overdue shipments right now — everything in flight is still within its target window.")
+
+                    kpi_cols = st.columns(4)
+                    kpi_data = [
+                        ("🟢 Healthy", summary["healthy"], "#0F6E56"),
+                        ("🟡 Watch", summary["watch"], "#854F0B"),
+                        ("🔴 At risk", summary["at_risk"], "#A32D2D"),
+                        ("🔴 Overdue", summary["overdue"], "#7A1F1F"),
+                    ]
+                    for col, (label, count, color) in zip(kpi_cols, kpi_data):
+                        with col:
+                            st.markdown(
+                                f'<div class="wa-kpi"><div class="wa-kpi-label">{label}</div>'
+                                f'<div class="wa-kpi-value" style="color:{color};">{count}</div></div>',
+                                unsafe_allow_html=True,
+                            )
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    dist_col, scatter_col = st.columns(2)
+                    with dist_col:
+                        st.markdown('<p class="wa-section-title" style="font-size:13px;">Couriers by risk level</p>', unsafe_allow_html=True)
+                        dist_df = (
+                            cs_risk["risk_level"].value_counts()
+                            .reindex(["🟢 Healthy", "🟡 Watch", "🔴 At risk", "🔴 Overdue"])
+                            .fillna(0).astype(int)
+                            .rename_axis("risk_level").reset_index(name="couriers")
+                        )
+                        st.bar_chart(dist_df.set_index("risk_level")[["couriers"]], y="couriers", color=RED, height=220)
+                    with scatter_col:
+                        st.markdown(
+                            '<p class="wa-section-title" style="font-size:13px;">Delivered/returned vs. remaining, per courier</p>',
+                            unsafe_allow_html=True,
+                        )
+                        st.scatter_chart(
+                            cs_risk.rename(columns={"completed_today": "Closed today", "remaining": "Remaining"}),
+                            x="Closed today", y="Remaining", color=RED, height=220,
+                        )
+                        st.caption("A courier high on 'Remaining' but low on 'Closed today' is the pattern worth checking in on.")
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.markdown('<p class="wa-section-title" style="font-size:13px;">Courier shift detail</p>', unsafe_allow_html=True)
+                    rows_html = ""
+                    for _, row in cs_risk.iterrows():
+                        text_color, bg_color = RISK_STYLE.get(row["risk_level"], ("#444", "#eee"))
+                        rows_html += _clean(f"""
+                        <tr style="border-bottom:1px solid {BORDER};">
+                            <td style="padding:8px 6px; font-size:13px;">{row['courier_name']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['delivered_today']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['returned_today']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right; font-weight:600;">{row['completed_today']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['remaining']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right; color:{MUTED};">{row['actual_progress_pct']:.0f}% vs {row['expected_progress_pct']:.0f}% expected</td>
+                            <td style="padding:8px 6px; text-align:right;">
+                                <span class="wa-badge" style="color:{text_color}; background:{bg_color};">{row['risk_level']}</span>
+                            </td>
+                        </tr>""")
+                    table_html = _clean(f"""
+                    <table style="width:100%; border-collapse:collapse;">
+                        <thead>
+                            <tr style="border-bottom:2px solid {BORDER};">
+                                <th style="text-align:left; padding:6px; font-size:12px; color:{MUTED};">Courier</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Delivered today</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Returned today</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Closed today</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Remaining</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Progress</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Risk</th>
+                            </tr>
+                        </thead>
+                        <tbody>{rows_html}</tbody>
+                    </table>
+                    """)
+                    st.markdown(table_html, unsafe_allow_html=True)
+                    st.caption(
+                        "'Closed today' = delivered or returned today (delivered_date_at / returned_date_at). "
+                        "'Remaining' = currently assigned to this courier and not yet delivered/returned/cancelled. "
+                        "'Progress' compares this courier's own closed-vs-remaining share against how much of "
+                        "the 5 PM–11 PM shift has elapsed — the same expected % for every courier."
+                    )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
