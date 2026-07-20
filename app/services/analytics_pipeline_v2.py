@@ -656,17 +656,26 @@ def courier_performance_by_period(df: pd.DataFrame, start_date, end_date,
                           day, or still open) — only meaningful for days
                           that are already over; today is handled
                           separately below since it isn't over yet.
+      carried_over is further split (2026-07-20, ADDITIVE) into 3
+      mutually-exclusive buckets that always sum to carried_over:
+        closed_later = delivered_at/returned_at set, just not same-day
+        still_open   = status not terminal, no delivered_at/returned_at
+        cancelled    = status == "cancelled" (source column: status)
 
     Returns a dict:
       "daily"       — [date, courier_name, assigned, closed_same_day,
-                       carried_over], only populated when the span is
-                       short enough for a table (see show_daily_table)
+                       closed_later, still_open, cancelled, carried_over],
+                       only populated when the span is short enough for a
+                       table (see show_daily_table)
       "show_daily_table" — bool, span_days <= DAILY_BREAKDOWN_MAX_DAYS
       "trend"       — [date, assigned, closed_same_day], for a chart when
                        the span is too long for a daily table
       "by_courier"  — [courier_name, assigned, closed_same_day,
-                       carried_over, closure_rate_pct], always populated,
-                       one row per courier for the whole period
+                       closed_later, still_open, cancelled,
+                       avg_days_to_close, carried_over, closure_rate_pct],
+                       always populated, one row per courier for the
+                       whole period (avg_days_to_close is NaN when
+                       closed_later == 0 for that courier)
       "by_area"     — [area, assigned, closed_same_day, closure_rate_pct]
       "today"       — dict with today's elapsed-shift pacing/risk (same
                        shape as courier_shift_risk), only present if today
@@ -678,10 +687,16 @@ def courier_performance_by_period(df: pd.DataFrame, start_date, end_date,
     today = now.normalize().date()
 
     result = {
-        "daily": pd.DataFrame(columns=["date", "courier_name", "assigned", "closed_same_day", "carried_over"]),
+        "daily": pd.DataFrame(columns=[
+            "date", "courier_name", "assigned", "closed_same_day",
+            "closed_later", "still_open", "cancelled", "carried_over",
+        ]),
         "show_daily_table": False,
         "trend": pd.DataFrame(columns=["date", "assigned", "closed_same_day"]),
-        "by_courier": pd.DataFrame(columns=["courier_name", "assigned", "closed_same_day", "carried_over", "closure_rate_pct"]),
+        "by_courier": pd.DataFrame(columns=[
+            "courier_name", "assigned", "closed_same_day", "closed_later",
+            "still_open", "cancelled", "avg_days_to_close", "carried_over", "closure_rate_pct",
+        ]),
         "by_area": pd.DataFrame(columns=["area", "assigned", "closed_same_day", "closure_rate_pct"]),
         "today": None,
         "span_days": 0,
@@ -705,11 +720,46 @@ def courier_performance_by_period(df: pd.DataFrame, start_date, end_date,
         | (in_range["returned_at"].notna() & (in_range["returned_at"].dt.date == in_range["created_date"]))
     )
 
+    # --- carried_over breakdown (2026-07-20, ADDITIVE) ---------------------
+    # carried_over used to be one lump number (assigned - closed_same_day).
+    # Split here into the 3 mutually-exclusive outcomes a non-same-day order
+    # can actually be in, using only existing/static columns — no new
+    # fetch, no new library:
+    #   closed_later = has delivered_at or returned_at, just not same day
+    #                  as created_at (both are real event timestamps, not
+    #                  editable fields)
+    #   cancelled    = status == "cancelled" (source column: `status`,
+    #                  same raw field used everywhere else in this file,
+    #                  e.g. the TERMINAL_STATUSES checks above)
+    #   still_open   = neither of the above — genuinely unresolved as of
+    #                  `now`, not just "not yet same-day-closed"
+    # Priority is cancelled > closed_later > still_open so the three are
+    # mutually exclusive and always sum to exactly carried_over.
+    _closed_at_all = in_range["delivered_at"].notna() | in_range["returned_at"].notna()
+    _cancelled = in_range["status"] == "cancelled"  # source column: status
+    _carried = ~in_range["closed_same_day"]
+    in_range["_carried_cancelled"] = _carried & _cancelled
+    in_range["_carried_closed_later"] = _carried & ~_cancelled & _closed_at_all
+    in_range["_carried_still_open"] = _carried & ~_cancelled & ~_closed_at_all
+    # days-to-close, only meaningful for the closed_later bucket (uses
+    # whichever of delivered_at/returned_at is populated)
+    _close_ts = in_range["delivered_at"].where(in_range["delivered_at"].notna(), in_range["returned_at"])
+    in_range["_days_to_close"] = (
+        (_close_ts - in_range["created_at"]).dt.total_seconds() / 86400
+    ).where(in_range["_carried_closed_later"])
+    # -------------------------------------------------------------------
+
     result["span_days"] = (end_date - start_date).days + 1
 
     daily = (
         in_range.groupby(["created_date", "courier_name"])
-        .agg(assigned=("shipment_id", "count"), closed_same_day=("closed_same_day", "sum"))
+        .agg(
+            assigned=("shipment_id", "count"),
+            closed_same_day=("closed_same_day", "sum"),
+            closed_later=("_carried_closed_later", "sum"),
+            still_open=("_carried_still_open", "sum"),
+            cancelled=("_carried_cancelled", "sum"),
+        )
         .reset_index()
         .rename(columns={"created_date": "date"})
     )
@@ -728,11 +778,19 @@ def courier_performance_by_period(df: pd.DataFrame, start_date, end_date,
 
     by_courier = (
         in_range.groupby("courier_name")
-        .agg(assigned=("shipment_id", "count"), closed_same_day=("closed_same_day", "sum"))
+        .agg(
+            assigned=("shipment_id", "count"),
+            closed_same_day=("closed_same_day", "sum"),
+            closed_later=("_carried_closed_later", "sum"),
+            still_open=("_carried_still_open", "sum"),
+            cancelled=("_carried_cancelled", "sum"),
+            avg_days_to_close=("_days_to_close", "mean"),
+        )
         .reset_index()
     )
     by_courier["carried_over"] = by_courier["assigned"] - by_courier["closed_same_day"]
     by_courier["closure_rate_pct"] = (by_courier["closed_same_day"] / by_courier["assigned"] * 100).round(1)
+    by_courier["avg_days_to_close"] = by_courier["avg_days_to_close"].round(1)  # NaN where closed_later == 0
     result["by_courier"] = by_courier.sort_values("carried_over", ascending=False).reset_index(drop=True)
 
     if "area" in in_range.columns:
@@ -810,6 +868,11 @@ def courier_performance_summary(perf: dict) -> dict:
     by_courier = perf.get("by_courier", pd.DataFrame())
     total_carried_over = int(by_courier["carried_over"].sum()) if not by_courier.empty else 0
     couriers_with_carryover = int((by_courier["carried_over"] > 0).sum()) if not by_courier.empty else 0
+    # breakdown totals (2026-07-20, ADDITIVE) — same 3 mutually-exclusive
+    # buckets as courier_performance_by_period(), summed across couriers
+    total_closed_later = int(by_courier["closed_later"].sum()) if not by_courier.empty else 0
+    total_still_open = int(by_courier["still_open"].sum()) if not by_courier.empty else 0
+    total_cancelled = int(by_courier["cancelled"].sum()) if not by_courier.empty else 0
 
     today = perf.get("today")
     healthy = watch = at_risk = overdue = 0
@@ -823,6 +886,9 @@ def courier_performance_summary(perf: dict) -> dict:
     return {
         "total_carried_over": total_carried_over,
         "couriers_with_carryover": couriers_with_carryover,
+        "total_closed_later": total_closed_later,
+        "total_still_open": total_still_open,
+        "total_cancelled": total_cancelled,
         "healthy": healthy, "watch": watch, "at_risk": at_risk, "overdue": overdue,
     }
 
