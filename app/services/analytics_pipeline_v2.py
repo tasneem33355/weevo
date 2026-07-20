@@ -609,8 +609,12 @@ def courier_shift_risk(df: pd.DataFrame, now: "pd.Timestamp | None" = None) -> p
     == today, for that courier (both count as "closed out", whichever
     way the shipment resolved).
     remaining = currently assigned to that courier, status not in
-    TERMINAL_STATUSES — same non-terminal definition used everywhere
-    else in this module.
+    TERMINAL_STATUSES, AND created_at is today — same today-scoping as
+    completed_today (2026-07-19 fix: previously counted ANY open shipment
+    regardless of when it was created, so a courier with old stuck
+    backlog looked artificially at-risk for today's shift specifically;
+    old open shipments are now surfaced separately by
+    stale_open_shipments() below instead).
     actual_progress_pct = completed_today / (completed_today + remaining)
     expected_progress_pct = % of the shift elapsed (same number for
     every courier, from get_shift_progress()).
@@ -634,7 +638,11 @@ def courier_shift_risk(df: pd.DataFrame, now: "pd.Timestamp | None" = None) -> p
         return empty
 
     today = progress["now"].normalize()
-    remaining_mask = ~assigned["status"].isin(TERMINAL_STATUSES)
+    remaining_mask = (
+        ~assigned["status"].isin(TERMINAL_STATUSES)
+        & assigned["created_at"].notna()
+        & (assigned["created_at"].dt.normalize() == today)
+    )
     delivered_today_mask = (
         (assigned["status"] == "delivered")
         & assigned["delivered_at"].notna()
@@ -708,6 +716,44 @@ def courier_shift_risk_summary(risk_df: pd.DataFrame) -> dict:
         "overdue": int(counts.get("🔴 Overdue", 0)),
         "total_remaining": int(risk_df["remaining"].sum()),
     }
+
+
+STALE_OPEN_SHIPMENT_DAYS = 2  # agreed threshold (2026-07-19): created_at 2+ days ago, still open
+
+
+def stale_open_shipments(df: pd.DataFrame, days: int = STALE_OPEN_SHIPMENT_DAYS,
+                          now: "pd.Timestamp | None" = None) -> pd.DataFrame:
+    """Shipments created `days`+ days ago that are still open (status not
+    in TERMINAL_STATUSES) — deliberately separate from Courier shift risk
+    (2026-07-19): a shipment sitting open for days isn't necessarily that
+    day's shift falling behind, and lumping it in there both skews a
+    courier's today-only risk score with a date it has nothing to do with,
+    and buries the real issue (an old unresolved shipment) inside a metric
+    that isn't about it.
+
+    Important limit, by design: there's no "last status update" timestamp
+    in this data, only created_at and the current status. So this can only
+    say "created X days ago and still not delivered/returned/cancelled" —
+    NOT "hasn't been touched in X days" (the status may well have changed
+    recently, e.g. in-transit -> in-transit-for-return two hours ago; we
+    just have no record of when). Sorted oldest-created first."""
+    if now is None:
+        now = pd.Timestamp.now()
+    empty = pd.DataFrame(columns=["shipment_id", "courier_name", "merchant_name", "status",
+                                   "created_at", "days_open"])
+    if df.empty or "created_at" not in df.columns:
+        return empty
+    open_mask = ~df["status"].isin(TERMINAL_STATUSES)
+    cutoff = now - pd.Timedelta(days=days)
+    stale = df[open_mask & df["created_at"].notna() & (df["created_at"] <= cutoff)].copy()
+    if stale.empty:
+        return empty
+    stale["days_open"] = ((now - stale["created_at"]).dt.total_seconds() / 86400).round(1)
+    return (
+        stale[["shipment_id", "courier_name", "merchant_name", "status", "created_at", "days_open"]]
+        .sort_values("days_open", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def financial_breakdown(df: pd.DataFrame) -> dict:
