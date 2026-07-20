@@ -1291,19 +1291,24 @@ def render_analytics_page():
                     st.markdown(
                         '<p class="wa-section-title" style="font-size:13px;">Courier totals for the selected period</p>'
                         '<p class="wa-section-sub">Assigned = orders created in this period, per courier. '
-                        'Closed same-day = delivered or returned the same day they were created. Carried over = '
-                        'resolved on a later day, or still open — worth checking in on, since a low same-day '
-                        'closure rate isn\'t necessarily this instant\'s pace, it\'s the whole period\'s.</p>',
+                        'Closed same-day = delivered or returned the same day they were created. Carried over '
+                        'is split into: Closed later (delivered/returned, just not same-day), Still open '
+                        '(genuinely unresolved as of now), and Cancelled (source column: status) — a low '
+                        'same-day closure rate isn\'t necessarily this instant\'s pace, it\'s the whole period\'s.</p>',
                         unsafe_allow_html=True,
                     )
                     rows_html = ""
                     for _, row in perf["by_courier"].iterrows():
+                        avg_days = row.get("avg_days_to_close")
+                        avg_days_display = f"{avg_days:.1f}d" if pd.notna(avg_days) else "–"
                         rows_html += _clean(f"""
                         <tr style="border-bottom:1px solid {BORDER};">
                             <td style="padding:8px 6px; font-size:13px;">{row['courier_name']}</td>
                             <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['assigned']}</td>
                             <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['closed_same_day']}</td>
-                            <td style="padding:8px 6px; font-size:13px; text-align:right; font-weight:600;">{row['carried_over']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right;">{row['closed_later']} <span style="color:{MUTED}; font-size:11px;">({avg_days_display})</span></td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right; font-weight:600; color:{RED};">{row['still_open']}</td>
+                            <td style="padding:8px 6px; font-size:13px; text-align:right; color:{MUTED};">{row['cancelled']}</td>
                             <td style="padding:8px 6px; font-size:13px; text-align:right; color:{MUTED};">{row['closure_rate_pct']:.0f}%</td>
                         </tr>""")
                     table_html = _clean(f"""
@@ -1313,7 +1318,9 @@ def render_analytics_page():
                                 <th style="text-align:left; padding:6px; font-size:12px; color:{MUTED};">Courier</th>
                                 <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Assigned</th>
                                 <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Closed same-day</th>
-                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Carried over</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Closed later (avg)</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Still open</th>
+                                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Cancelled</th>
                                 <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Same-day closure rate</th>
                             </tr>
                         </thead>
@@ -1327,7 +1334,9 @@ def render_analytics_page():
                         st.markdown('<p class="wa-section-title" style="font-size:13px;">Daily breakdown</p>', unsafe_allow_html=True)
                         daily_display = perf["daily"].rename(columns={
                             "date": "Date", "courier_name": "Courier", "assigned": "Assigned",
-                            "closed_same_day": "Closed same-day", "carried_over": "Carried over",
+                            "closed_same_day": "Closed same-day", "closed_later": "Closed later",
+                            "still_open": "Still open", "cancelled": "Cancelled",
+                            "carried_over": "Carried over",
                         })
                         st.dataframe(daily_display, use_container_width=True, hide_index=True, height=320)
                     elif not perf["trend"].empty:
