@@ -851,7 +851,7 @@ def build_shipments_dataframe(raw_records: list, fetch_meta: Optional[dict] = No
 
         rows.append({
             "phone_number": s.get("client_phone"),
-            "shipment_id": s.get("id") or s.get("barcode"),
+            "shipment_id": s.get("id") if s.get("id") is not None else s.get("barcode"),
             "product_name": None,
             "merchant_name": merchant_name,
             "courier_name": courier_name,
@@ -1030,12 +1030,14 @@ def generate_mock_shipments(n: int = 1800, days_back: int = 60, seed: int = 42) 
             "area": area,
             "received_at": received_at,
             "delivered_at": delivered_at,
+            "created_at": received_at,
         })
 
     df = pd.DataFrame(rows)
     df["delivery_date"] = pd.to_datetime(df["delivery_date"])
     df["received_at"] = pd.to_datetime(df["received_at"])
     df["delivered_at"] = pd.to_datetime(df["delivered_at"])
+    df["created_at"] = pd.to_datetime(df["created_at"])
     both_present = df["received_at"].notna() & df["delivered_at"].notna()
     df["delivery_hours"] = pd.NA
     df.loc[both_present, "delivery_hours"] = (
@@ -1298,8 +1300,7 @@ def _authoritative_total_orders(df: pd.DataFrame) -> Optional[int]:
     (confirmed in fetch_admin_shipments' docstring to match pagination.total
     exactly) reflects the ENTIRE filtered result set for the date range —
     unlike a local count/nunique over `df`, which only reflects however many
-    rows actually made it into `df` (e.g. undercounts silently when a fetch
-    was truncated by the time budget, see Known Bug 1). Returns None if not
+    rows actually made it into `df`. Returns None if not
     available, so callers can fall back to the previous local-count
     behaviour unchanged."""
     status_counts = df.attrs.get("status_counts") if hasattr(df, "attrs") else None
