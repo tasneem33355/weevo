@@ -1028,13 +1028,6 @@ def render_analytics_page():
             else:
                 st.warning("No shipment data returned yet.")
         else:
-            if "created_at" in df_v2_dated.columns and df_v2_dated["created_at"].notna().any():
-                pulled_from = "the API" if not v2_from_archive else "the saved archive"
-                st.caption(
-                    f"📅 Covers orders created {df_v2_dated['created_at'].min():%d %b} → "
-                    f"{df_v2_dated['created_at'].max():%d %b} — every delivered + returned order "
-                    f"in the selected date range, pulled from {pulled_from}."
-                )
             if v2_date_filter_active and v2_min_date and v2_max_date:
                 naive_start = date_range[0]
                 if naive_start < v2_min_date:
@@ -1044,17 +1037,6 @@ def render_analytics_page():
                         f"({actual_span} day(s) available) — the selected range would need data "
                         f"back to {naive_start.strftime('%d %b')}. Showing everything available instead."
                     )
-                elif naive_start == v2_min_date:
-                    actual_span = (v2_max_date - v2_min_date).days + 1
-                    st.caption(
-                        f"ℹ️ This is exactly all the delivered/returned data currently loaded "
-                        f"({actual_span} day(s)) — a wider range would show the same numbers."
-                    )
-            if v2_date_filter_active and not df_v2_risk.empty:
-                st.caption(
-                    f"ℹ️ {len(df_v2_risk):,} in-flight/overdue shipment(s) below are always included "
-                    "regardless of the date range — risk is a live snapshot, not a historical count."
-                )
 
             rev = revenue_summary(df_v2)
             rc1, rc2, rc3, rc4, rc5 = st.columns(5)
