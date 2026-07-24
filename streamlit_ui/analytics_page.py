@@ -260,14 +260,10 @@ def render_analytics_page():
     admin_start_date = None
     admin_end_date = None
     if _preset == "Custom range":
-        _custom = st.session_state.get("wa_date_range_custom")
-        if (
-            isinstance(_custom, (tuple, list))
-            and len(_custom) == 2
-            and _custom[0]
-            and _custom[1]
-        ):
-            admin_start_date, admin_end_date = _custom
+        _custom_from = st.session_state.get("wa_date_range_from")
+        _custom_to = st.session_state.get("wa_date_range_to")
+        if _custom_from and _custom_to:
+            admin_start_date, admin_end_date = _custom_from, _custom_to
         else:
             _last_resolved = st.session_state.get("wa_admin_resolved_range")
             if _last_resolved:
@@ -554,86 +550,100 @@ def render_analytics_page():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    fcol1, fcol2, fcol3 = st.columns(3)
-    with fcol1:
-        area_options = sorted(df_all["area"].dropna().unique().tolist())
-        selected_areas = st.multiselect("Area", area_options, default=[], placeholder="All areas")
-    with fcol2:
-        merchant_options = sorted(df_all["merchant_name"].dropna().unique().tolist())
-        selected_merchants = st.multiselect("Merchant", merchant_options, default=[], placeholder="All merchants")
-    with fcol3:
-        granularity_label = st.selectbox("Group orders by", ["Daily", "Weekly", "Monthly"], index=1)
-        granularity_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
+    with st.form("wa_filters_form"):
+        fcol1, fcol2, fcol3 = st.columns(3)
+        with fcol1:
+            area_options = sorted(df_all["area"].dropna().unique().tolist())
+            selected_areas = st.multiselect("Area", area_options, default=[], placeholder="All areas")
+        with fcol2:
+            merchant_options = sorted(df_all["merchant_name"].dropna().unique().tolist())
+            selected_merchants = st.multiselect("Merchant", merchant_options, default=[], placeholder="All merchants")
+        with fcol3:
+            granularity_label = st.selectbox("Group orders by", ["Daily", "Weekly", "Monthly"], index=1)
+            granularity_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
 
-    date_col = df_all.loc[
-        df_all["status"].isin(DATED_STATUSES), "created_at"
-    ].dropna() if "status" in df_all.columns else df_all["created_at"].dropna()
-    dcol1, dcol2 = st.columns([1, 2])
-    date_range = None
-    if date_col.empty and not df_all["created_at"].dropna().empty:
-        st.caption(
-            "Date range filter isn't available — no delivered/returned orders are "
-            "loaded yet to anchor it to (only in-flight orders, whose dates are "
-            "scheduled targets rather than real event times)."
-        )
-    if not date_col.empty:
-        min_date, max_date = date_col.min().date(), date_col.max().date()
-        today_real = pd.Timestamp.now().date()
-        with dcol1:
-            preset = st.selectbox(
-                "Date range",
-                ["All time", "Last 24 hours", "Last 7 days", "Last 30 days", "Custom range"],
-                index=0,
-                key="wa_date_preset",
+        date_col = df_all.loc[
+            df_all["status"].isin(DATED_STATUSES), "created_at"
+        ].dropna() if "status" in df_all.columns else df_all["created_at"].dropna()
+        dcol1, dcol2 = st.columns([1, 2])
+        date_range = None
+        if date_col.empty and not df_all["created_at"].dropna().empty:
+            st.caption(
+                "Date range filter isn't available — no delivered/returned orders are "
+                "loaded yet to anchor it to (only in-flight orders, whose dates are "
+                "scheduled targets rather than real event times)."
             )
-        if preset == "Custom range":
-            with dcol2:
-                _widget_max_date = max(max_date, today_real)
-                _widget_min_date = min(min_date, today_real - pd.Timedelta(days=730))
-                st.session_state.setdefault("wa_date_range_custom", (min_date, _widget_max_date))
-                _stored_custom = st.session_state["wa_date_range_custom"]
-                if _stored_custom is None:
-                    _clamped_custom = (min_date, _widget_max_date)
-                elif isinstance(_stored_custom, (tuple, list)):
-                    _clamped_custom = tuple(min(max(d, _widget_min_date), _widget_max_date) for d in _stored_custom)
-                else:
-                    _clamped_custom = min(max(_stored_custom, _widget_min_date), _widget_max_date)
-                if _clamped_custom != _stored_custom:
-                    st.session_state["wa_date_range_custom"] = _clamped_custom
-                try:
-                    date_range = st.date_input(
-                        "Pick dates", min_value=_widget_min_date, max_value=_widget_max_date,
-                        key="wa_date_range_custom",
-                    )
-                except st.errors.StreamlitAPIException:
-                    st.session_state["wa_date_range_custom"] = (min_date, _widget_max_date)
-                    date_range = (min_date, _widget_max_date)
-        elif preset != "All time":
-            days = {"Last 24 hours": 1, "Last 7 days": 7, "Last 30 days": 30}[preset]
-            window_end = min(max_date, today_real)
-            naive_start = window_end - pd.Timedelta(days=days)
-            window_start = max(min_date, naive_start)
-            date_range = (window_start, window_end)
-            if max_date > today_real:
-                st.caption(
-                    f"ℹ️ Some loaded orders have a scheduled/target date after today "
-                    f"({max_date.strftime('%d %b')}) — likely in-flight orders with a "
-                    f"future pickup time. '{preset}' is anchored to today, not to those "
-                    f"future dates, so it won't include them."
+        if not date_col.empty:
+            min_date, max_date = date_col.min().date(), date_col.max().date()
+            today_real = pd.Timestamp.now().date()
+            with dcol1:
+                preset = st.selectbox(
+                    "Date range",
+                    ["All time", "Last 24 hours", "Last 7 days", "Last 30 days", "Custom range"],
+                    index=0,
+                    key="wa_date_preset",
                 )
-            if naive_start <= min_date:
-                actual_span = (window_end - min_date).days + 1
-                if naive_start < min_date:
+            if preset == "Custom range":
+                with dcol2:
+                    _widget_max_date = max(max_date, today_real)
+                    _widget_min_date = min(min_date, today_real - pd.Timedelta(days=730))
+                    st.session_state.setdefault("wa_date_range_from", min_date)
+                    st.session_state.setdefault("wa_date_range_to", _widget_max_date)
+
+                    def _clamp_custom_date(d):
+                        return min(max(d, _widget_min_date), _widget_max_date)
+
+                    _clamped_from = _clamp_custom_date(st.session_state["wa_date_range_from"])
+                    _clamped_to = _clamp_custom_date(st.session_state["wa_date_range_to"])
+                    if _clamped_from > _clamped_to:
+                        _clamped_from, _clamped_to = _clamped_to, _clamped_from
+                    if _clamped_from != st.session_state["wa_date_range_from"]:
+                        st.session_state["wa_date_range_from"] = _clamped_from
+                    if _clamped_to != st.session_state["wa_date_range_to"]:
+                        st.session_state["wa_date_range_to"] = _clamped_to
+
+                    _from_col, _to_col = st.columns(2)
+                    with _from_col:
+                        _from_date = st.date_input(
+                            "From", min_value=_widget_min_date, max_value=_widget_max_date,
+                            key="wa_date_range_from",
+                        )
+                    with _to_col:
+                        _to_date = st.date_input(
+                            "To", min_value=_widget_min_date, max_value=_widget_max_date,
+                            key="wa_date_range_to",
+                        )
+                    if _from_date > _to_date:
+                        _from_date, _to_date = _to_date, _from_date
+                    date_range = (_from_date, _to_date)
+            elif preset != "All time":
+                days = {"Last 24 hours": 1, "Last 7 days": 7, "Last 30 days": 30}[preset]
+                window_end = min(max_date, today_real)
+                naive_start = window_end - pd.Timedelta(days=days)
+                window_start = max(min_date, naive_start)
+                date_range = (window_start, window_end)
+                if max_date > today_real:
                     st.caption(
-                        f"⚠️ Data only goes back to {min_date.strftime('%d %b')} ({actual_span} day(s) "
-                        f"available) — '{preset}' would need data back to {naive_start.strftime('%d %b')}. "
-                        f"Showing everything available instead of a full {days}-day window."
+                        f"ℹ️ Some loaded orders have a scheduled/target date after today "
+                        f"({max_date.strftime('%d %b')}) — likely in-flight orders with a "
+                        f"future pickup time. '{preset}' is anchored to today, not to those "
+                        f"future dates, so it won't include them."
                     )
-                else:
-                    st.caption(
-                        f"ℹ️ This is exactly all the data currently available ({actual_span} day(s), "
-                        f"since {min_date.strftime('%d %b')}) — a wider date range would show the same result."
-                    )
+                if naive_start <= min_date:
+                    actual_span = (window_end - min_date).days + 1
+                    if naive_start < min_date:
+                        st.caption(
+                            f"⚠️ Data only goes back to {min_date.strftime('%d %b')} ({actual_span} day(s) "
+                            f"available) — '{preset}' would need data back to {naive_start.strftime('%d %b')}. "
+                            f"Showing everything available instead of a full {days}-day window."
+                        )
+                    else:
+                        st.caption(
+                            f"ℹ️ This is exactly all the data currently available ({actual_span} day(s), "
+                            f"since {min_date.strftime('%d %b')}) — a wider date range would show the same result."
+                        )
+
+        st.form_submit_button("Apply filters")
 
     df = df_all.copy()
     if selected_areas:
@@ -641,7 +651,7 @@ def render_analytics_page():
     if selected_merchants:
         df = df[df["merchant_name"].isin(selected_merchants)]
 
-    date_filter_active = bool(date_range and len(date_range) == 2)
+    date_filter_active = bool(date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2)
     if date_filter_active:
         start, end = date_range
         df = df[(df["created_at"].dt.date >= start) & (df["created_at"].dt.date <= end)]
@@ -997,7 +1007,7 @@ def render_analytics_page():
             v2_min_date = v2_full_dated_dates.min().date() if not v2_full_dated_dates.empty else None
             v2_max_date = v2_full_dated_dates.max().date() if not v2_full_dated_dates.empty else None
 
-            v2_date_filter_active = bool(date_range and len(date_range) == 2 and "created_at" in df_v2_dated.columns)
+            v2_date_filter_active = bool(date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2 and "created_at" in df_v2_dated.columns)
 
             df_v2 = pd.concat([df_v2_dated, df_v2_risk], ignore_index=True) if not df_v2_risk.empty else df_v2_dated.copy()
 
@@ -1165,7 +1175,7 @@ def render_analytics_page():
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<p class="wa-section-title" style="font-size:14px;">Courier performance (selected period)</p>', unsafe_allow_html=True)
 
-            if date_range and len(date_range) == 2:
+            if date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2:
                 _perf_start, _perf_end = date_range
             elif v2_min_date and v2_max_date:
                 _perf_start, _perf_end = v2_min_date, v2_max_date
