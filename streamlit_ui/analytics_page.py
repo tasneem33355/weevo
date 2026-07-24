@@ -269,7 +269,7 @@ def render_analytics_page():
             if _last_resolved:
                 admin_start_date, admin_end_date = _last_resolved
     if admin_start_date is None or admin_end_date is None:
-        _preset_days = {"Last 24 hours": 1, "Last 7 days": 7, "Last 30 days": 30}.get(_preset, 30)
+        _preset_days = {"Last 24 hours": 1, "Last 7 days": 7, "Last 30 days": 30}.get(_preset, 1)
         admin_end_date = _today_real
         admin_start_date = _today_real - timedelta(days=_preset_days)
     admin_start_str = admin_start_date.strftime("%Y-%m-%d") if admin_start_date else None
