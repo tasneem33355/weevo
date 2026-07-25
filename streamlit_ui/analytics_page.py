@@ -562,17 +562,9 @@ def render_analytics_page():
             granularity_label = st.selectbox("Group orders by", ["Daily", "Weekly", "Monthly"], index=1)
             granularity_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
 
-        date_col = df_all.loc[
-            df_all["status"].isin(DATED_STATUSES), "created_at"
-        ].dropna() if "status" in df_all.columns else df_all["created_at"].dropna()
+        date_col = df_all["created_at"].dropna()
         dcol1, dcol2 = st.columns([1, 2])
         date_range = None
-        if date_col.empty and not df_all["created_at"].dropna().empty:
-            st.caption(
-                "Date range filter isn't available — no delivered/returned orders are "
-                "loaded yet to anchor it to (only in-flight orders, whose dates are "
-                "scheduled targets rather than real event times)."
-            )
         if not date_col.empty:
             min_date, max_date = date_col.min().date(), date_col.max().date()
             today_real = pd.Timestamp.now().date()
