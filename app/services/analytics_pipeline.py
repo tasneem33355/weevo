@@ -83,8 +83,27 @@ from typing import Optional
 
 import pandas as pd
 import httpx
+import pytz
 
 WEEVO_API_BASE_URL = os.getenv("WEEVO_API_BASE_URL", "https://eg.api.weevoapp.com")
+
+CAIRO_TZ = pytz.timezone("Africa/Cairo")
+
+def _cairo_now() -> pd.Timestamp:
+    """Current wall-clock time in Africa/Cairo (Egypt), as a naive
+    Timestamp — matches the already-naive, already-Cairo-local
+    created_at/delivered_at/returned_at timestamps the Weevo API returns.
+    ADDED 2026-07-26: a server running in UTC (the common default) was
+    silently computing "now" as UTC via bare datetime.now()/
+    pd.Timestamp.now(), which ran hours behind real Cairo time — this
+    showed up as a stale-looking "Last synced" time, courier shift
+    pacing calculated against the wrong point in the shift, and the
+    calendar day only flipping over hours after Cairo midnight actually
+    passed. NOT used for the admin-API auth token expiry check just
+    below (datetime.now(timezone.utc)), which is correctly UTC since it
+    compares against the token's own UTC expiry — only for anything
+    representing "today"/"now" from the business's point of view."""
+    return pd.Timestamp.now(tz=CAIRO_TZ).tz_localize(None)
 
 ADMIN_SHIPMENTS_PATH = "/api/v1/admin-5678vna9k6/shipments"
 ADMIN_PAGE_SIZE = 500
@@ -654,8 +673,21 @@ def _get_admin_bearer_token(api_key: str, base_url: str = WEEVO_API_BASE_URL,
         _ADMIN_TOKEN_CACHE[cache_key] = fresh
     return fresh["access_token"]
 
+# Confirmed 2026-07-26 from a captured real request against the Weevo admin
+# dashboard's own UI (browser Network tab) — exact param name pairs per date
+# type. "created" (start_date/end_date) is the pre-existing default this
+# pipeline has always used. The other four are additive/opt-in.
+DATE_FIELD_PARAM_MAP = {
+    "created": ("start_date", "end_date"),
+    "delivery": ("start_delivery_date", "end_delivery_date"),
+    "pickup": ("start_pickup_date", "end_pickup_date"),
+    "delivered": ("start_delivered_date", "end_delivered_date"),
+    "returned": ("start_returned_date", "end_returned_date"),
+}
+
 def _fetch_admin_shipments_page(api_key: str, page: int, limit: int = ADMIN_PAGE_SIZE,
                                  start_date: Optional[str] = None, end_date: Optional[str] = None,
+                                 date_field: str = "created",
                                  country_id: int = ADMIN_DEFAULT_COUNTRY_ID,
                                  in_batch: int = ADMIN_DEFAULT_IN_BATCH,
                                  base_url: str = WEEVO_API_BASE_URL,
@@ -666,6 +698,15 @@ def _fetch_admin_shipments_page(api_key: str, page: int, limit: int = ADMIN_PAGE
     own `statusCounts` block, which (confirmed) reflects the ENTIRE
     filtered result set for the date range, not just this page.
 
+    date_field selects which pair of query params start_date/end_date are
+    sent as — "created" (default, existing behavior), "delivery",
+    "pickup", "delivered", or "returned" (see DATE_FIELD_PARAM_MAP).
+    Only the one matching param pair is sent — deliberately not layering
+    start_date/end_date underneath as well, since that extra ceiling was
+    only ever observed alongside a leftover "Create To" value still sitting
+    in the source dashboard's own filter form, not confirmed as a real
+    second condition.
+
     Auth (2026-07-16): sends the cached Bearer access token, obtained via
     the real email+password bootstrap login (_login_admin()). On a 401
     the token is refreshed exactly once and the request retried with the
@@ -673,10 +714,11 @@ def _fetch_admin_shipments_page(api_key: str, page: int, limit: int = ADMIN_PAGE
     failure, not retried further."""
     url = f"{base_url}{ADMIN_SHIPMENTS_PATH}"
     params = {"country_id": country_id, "page": page, "paginate": limit, "in_batch": in_batch}
+    start_param, end_param = DATE_FIELD_PARAM_MAP.get(date_field, DATE_FIELD_PARAM_MAP["created"])
     if start_date:
-        params["start_date"] = start_date
+        params[start_param] = start_date
     if end_date:
-        params["end_date"] = end_date
+        params[end_param] = end_date
 
     attempt = 0
     reauthed = False
@@ -713,6 +755,7 @@ def _fetch_admin_shipments_page(api_key: str, page: int, limit: int = ADMIN_PAGE
             raise
 
 def fetch_admin_shipments(api_key: str, start_date: Optional[str] = None, end_date: Optional[str] = None,
+                           date_field: str = "created",
                            country_id: int = ADMIN_DEFAULT_COUNTRY_ID, in_batch: int = ADMIN_DEFAULT_IN_BATCH,
                            base_url: str = WEEVO_API_BASE_URL, limit: int = ADMIN_PAGE_SIZE) -> tuple[list, dict, dict]:
     """
@@ -722,6 +765,10 @@ def fetch_admin_shipments(api_key: str, start_date: Optional[str] = None, end_da
     both the main analytics section and the Financial/Risk (v2) section
     are built from (see streamlit_ui/analytics_page.py), so both always
     reflect the exact same underlying records.
+
+    date_field ADDED 2026-07-26 — which date the range is filtered
+    against: "created" (default), "delivery", "pickup", "delivered", or
+    "returned" (see DATE_FIELD_PARAM_MAP in _fetch_admin_shipments_page).
 
     If `start_date`/`end_date` are both None ("All time"), no date filter
     is sent at all — same "preserve existing behavior, no new artificial
@@ -746,7 +793,7 @@ def fetch_admin_shipments(api_key: str, start_date: Optional[str] = None, end_da
 
     label = "shipments"
     if start_date or end_date:
-        label = f"shipments ({start_date or '…'} → {end_date or '…'})"
+        label = f"shipments ({date_field}: {start_date or '…'} → {end_date or '…'})"
 
     while page <= last_page:
         if time.monotonic() - start_time > FETCH_TIME_BUDGET_V1:
@@ -755,7 +802,7 @@ def fetch_admin_shipments(api_key: str, start_date: Optional[str] = None, end_da
         try:
             records, pagination, sc = _fetch_admin_shipments_page(
                 api_key, page=page, limit=limit, start_date=start_date, end_date=end_date,
-                country_id=country_id, in_batch=in_batch, base_url=base_url,
+                date_field=date_field, country_id=country_id, in_batch=in_batch, base_url=base_url,
             )
         except httpx.HTTPStatusError as e:
             error = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
@@ -785,7 +832,7 @@ def fetch_admin_shipments(api_key: str, start_date: Optional[str] = None, end_da
         "truncated_by_budget": truncated_by_budget,
         "pages_fetched": pages_fetched,
         "last_page": last_page,
-        "fetched_at": datetime.now().isoformat(),
+        "fetched_at": _cairo_now().isoformat(),
     }
     return all_records, status_counts, fetch_meta
 
@@ -851,7 +898,7 @@ def build_shipments_dataframe(raw_records: list, fetch_meta: Optional[dict] = No
 
         rows.append({
             "phone_number": s.get("client_phone"),
-            "shipment_id": s.get("id") if s.get("id") is not None else s.get("barcode"),
+            "shipment_id": s.get("id") or s.get("barcode"),
             "product_name": None,
             "merchant_name": merchant_name,
             "courier_name": courier_name,
@@ -913,7 +960,7 @@ def load_real_shipments_from_admin_api(api_key: str, base_url: str = WEEVO_API_B
     resolves to the last 30 days here — never an unbounded all-history
     fetch — matching the Streamlit page's own "All time" default."""
     if start_date is None and end_date is None:
-        _end = datetime.now().date()
+        _end = _cairo_now().date()
         _start = _end - timedelta(days=30)
         start_date, end_date = _start.strftime("%Y-%m-%d"), _end.strftime("%Y-%m-%d")
     records, status_counts, fetch_meta = fetch_admin_shipments(
@@ -983,7 +1030,7 @@ def generate_mock_shipments(n: int = 1800, days_back: int = 60, seed: int = 42) 
     """
     rng = random.Random(seed)
     rows = []
-    today = datetime.now()
+    today = _cairo_now()
 
     merchant_weights = [rng.uniform(0.3, 3.0) for _ in _MOCK_MERCHANTS]
     courier_weights = [rng.uniform(0.5, 2.5) for _ in _MOCK_COURIERS]
@@ -1030,14 +1077,12 @@ def generate_mock_shipments(n: int = 1800, days_back: int = 60, seed: int = 42) 
             "area": area,
             "received_at": received_at,
             "delivered_at": delivered_at,
-            "created_at": received_at,
         })
 
     df = pd.DataFrame(rows)
     df["delivery_date"] = pd.to_datetime(df["delivery_date"])
     df["received_at"] = pd.to_datetime(df["received_at"])
     df["delivered_at"] = pd.to_datetime(df["delivered_at"])
-    df["created_at"] = pd.to_datetime(df["created_at"])
     both_present = df["received_at"].notna() & df["delivered_at"].notna()
     df["delivery_hours"] = pd.NA
     df.loc[both_present, "delivery_hours"] = (
@@ -1300,7 +1345,8 @@ def _authoritative_total_orders(df: pd.DataFrame) -> Optional[int]:
     (confirmed in fetch_admin_shipments' docstring to match pagination.total
     exactly) reflects the ENTIRE filtered result set for the date range —
     unlike a local count/nunique over `df`, which only reflects however many
-    rows actually made it into `df`. Returns None if not
+    rows actually made it into `df` (e.g. undercounts silently when a fetch
+    was truncated by the time budget, see Known Bug 1). Returns None if not
     available, so callers can fall back to the previous local-count
     behaviour unchanged."""
     status_counts = df.attrs.get("status_counts") if hasattr(df, "attrs") else None
