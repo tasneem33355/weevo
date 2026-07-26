@@ -48,6 +48,7 @@ from app.services.analytics_pipeline import (
     HEAVY_STATUSES_V1,
     fetch_admin_shipments,
     build_shipments_dataframe,
+    _cairo_now,
 )
 
 DATED_STATUSES = HEAVY_STATUSES_V1
@@ -105,26 +106,32 @@ RISK_STYLE = {
 CACHE_TTL_SECONDS = 300
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Fetching latest shipment data from Weevo…")
-def _cached_admin_shipments(api_key: str, start_date, end_date):
+def _cached_admin_shipments(api_key: str, start_date, end_date, date_field: str = "created"):
     """
     ADDED (2026-07-15 admin-API migration) — the ONE shared live fetch.
     Both _cached_api_load (main section) and _cached_v2_load (Financial/
     Risk section) below call this with the same (api_key, start_date,
-    end_date), so within a single script run — and across reruns inside
-    the cache TTL — they hit the same cache entry and are guaranteed to be
-    built from byte-identical raw records. This is what makes "both
-    sections always use the exact same dataset" true, not just a
-    convention someone has to remember to keep passing the same args.
+    end_date, date_field), so within a single script run — and across
+    reruns inside the cache TTL — they hit the same cache entry and are
+    guaranteed to be built from byte-identical raw records. This is what
+    makes "both sections always use the exact same dataset" true, not
+    just a convention someone has to remember to keep passing the same
+    args.
 
     start_date/end_date are "YYYY-MM-DD" strings or None (None/None = no
     date filter sent at all, i.e. "All time" — same as this always meant:
     no additional limit invented here, the only ceiling is the existing
     fetch time budget inside fetch_admin_shipments itself).
+
+    date_field ADDED 2026-07-26 — which date the range applies to:
+    "created" (default), "delivery", "pickup", "delivered", or
+    "returned". Part of the cache key like everything else here, so
+    switching it actually refetches instead of reusing a stale entry.
     """
-    return fetch_admin_shipments(api_key=api_key, start_date=start_date, end_date=end_date)
+    return fetch_admin_shipments(api_key=api_key, start_date=start_date, end_date=end_date, date_field=date_field)
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Fetching latest shipment data from Weevo…")
-def _cached_api_load(api_key: str, start_date=None, end_date=None) -> pd.DataFrame:
+def _cached_api_load(api_key: str, start_date=None, end_date=None, date_field: str = "created") -> pd.DataFrame:
     """
     Caches the live API pull for CACHE_TTL_SECONDS.
 
@@ -141,12 +148,14 @@ def _cached_api_load(api_key: str, start_date=None, end_date=None) -> pd.DataFra
     shared fetch above so a changed date-range selection actually
     refetches (previously the cache key was only api_key, so changing
     the date preset never invalidated the cache either).
+
+    date_field ADDED 2026-07-26 — see _cached_admin_shipments above.
     """
-    raw_records, status_counts, fetch_meta = _cached_admin_shipments(api_key, start_date, end_date)
+    raw_records, status_counts, fetch_meta = _cached_admin_shipments(api_key, start_date, end_date, date_field)
     return build_shipments_dataframe(raw_records, fetch_meta=fetch_meta, status_counts=status_counts)
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Pulling delivered/returned shipments for financial + risk analysis…")
-def _cached_v2_load(api_key: str, start_date=None, end_date=None) -> pd.DataFrame:
+def _cached_v2_load(api_key: str, start_date=None, end_date=None, date_field: str = "created") -> pd.DataFrame:
     """
     Same caching rationale as _cached_api_load above, separate cache entry
     since it's a differently-shaped DataFrame — but built from the SAME
@@ -154,8 +163,10 @@ def _cached_v2_load(api_key: str, start_date=None, end_date=None) -> pd.DataFram
     fetch. This is the fix for "the two sections must never fetch
     different data" — previously this called load_shipments_v2(), which
     did its own separate, differently-scoped HTTP pull.
+
+    date_field ADDED 2026-07-26 — see _cached_admin_shipments above.
     """
-    raw_records, _status_counts, fetch_meta = _cached_admin_shipments(api_key, start_date, end_date)
+    raw_records, _status_counts, fetch_meta = _cached_admin_shipments(api_key, start_date, end_date, date_field)
     return build_v2_dataframe(raw_records, fetch_meta=fetch_meta)
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Fetching full merchant roster…")
@@ -251,12 +262,22 @@ def _kpi_card(icon: str, icon_bg: str, icon_color: str, label: str, value: str, 
         return f'<a class="wa-kpi-link" href="#{anchor}">{card}</a>'
     return card
 
+DATE_FIELD_LABELS = {
+    "Created": "created",
+    "Delivery target": "delivery",
+    "Pickup target": "pickup",
+    "Delivered (actual)": "delivered",
+    "Returned (actual)": "returned",
+}
+
 def render_analytics_page():
     st.markdown('<div id="weevo-analytics">', unsafe_allow_html=True)
     _inject_css()
 
     _preset = st.session_state.get("wa_date_preset", "All time")
-    _today_real = datetime.now().date()
+    _date_field_label = st.session_state.get("wa_date_field_select", "Created")
+    admin_date_field = DATE_FIELD_LABELS.get(_date_field_label, "created")
+    _today_real = _cairo_now().date()
     admin_start_date = None
     admin_end_date = None
     if _preset == "Custom range":
@@ -356,7 +377,7 @@ def render_analytics_page():
                 st.info("Enter the Integration key in the sidebar to load live data.")
                 df_all, active_source_label = _fallback("api", "No Integration key provided.")
             else:
-                df_all = _cached_api_load(api_key, start_date=admin_start_str, end_date=admin_end_str)
+                df_all = _cached_api_load(api_key, start_date=admin_start_str, end_date=admin_end_str, date_field=admin_date_field)
                 df_all = enrich_areas_with_cache(df_all)
         elif source == "db":
             df_all = load_shipments(source="db", db_path=db_path)
@@ -397,7 +418,7 @@ def render_analytics_page():
     with hcol2:
         st.markdown(
             f'<div class="wa-synced">Last synced<br>'
-            f'<b>{datetime.now().strftime("%d %b %Y, %I:%M %p")}</b></div>',
+            f'<b>{_cairo_now().strftime("%d %b %Y, %I:%M %p")}</b></div>',
             unsafe_allow_html=True,
         )
 
@@ -440,7 +461,7 @@ def render_analytics_page():
                     f"{summary['total_in_archive']} total."
                 )
                 try:
-                    df_v2_for_save = _cached_v2_load(api_key, start_date=admin_start_str, end_date=admin_end_str)
+                    df_v2_for_save = _cached_v2_load(api_key, start_date=admin_start_str, end_date=admin_end_str, date_field=admin_date_field)
                     if not df_v2_for_save.empty:
                         v2_summary = append_to_v2_archive(df_v2_for_save, archive_path=v2_archive_path)
                         msg += (
@@ -456,18 +477,18 @@ def render_analytics_page():
             st.download_button(
                 "⬇️ Download main snapshot",
                 data=df_all.to_csv(index=False).encode("utf-8"),
-                file_name=f"weevo_snapshot_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                file_name=f"weevo_snapshot_{_cairo_now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv",
             )
         with snap_col3:
             try:
-                df_v2_for_download = _cached_v2_load(api_key, start_date=admin_start_str, end_date=admin_end_str)
+                df_v2_for_download = _cached_v2_load(api_key, start_date=admin_start_str, end_date=admin_end_str, date_field=admin_date_field)
             except Exception:
                 df_v2_for_download = pd.DataFrame()
             st.download_button(
                 "⬇️ Download financial snapshot",
                 data=df_v2_for_download.to_csv(index=False).encode("utf-8"),
-                file_name=f"weevo_financial_snapshot_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                file_name=f"weevo_financial_snapshot_{_cairo_now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv",
                 disabled=df_v2_for_download.empty,
             )
@@ -520,7 +541,7 @@ def render_analytics_page():
         try:
             v2_gap_info = detect_v2_archive_gap(
                 load_v2_archive(v2_archive_path),
-                _cached_v2_load(api_key, start_date=admin_start_str, end_date=admin_end_str),
+                _cached_v2_load(api_key, start_date=admin_start_str, end_date=admin_end_str, date_field=admin_date_field),
             )
         except Exception:
             v2_gap_info = {"reason": "no_live_data", "has_gap": False}
@@ -563,11 +584,31 @@ def render_analytics_page():
             granularity_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
 
         date_col = df_all["created_at"].dropna()
-        dcol1, dcol2 = st.columns([1, 2])
+        dcol0, dcol1, dcol2 = st.columns([1, 1, 2])
         date_range = None
+        with dcol0:
+            st.selectbox(
+                "Filter by",
+                list(DATE_FIELD_LABELS.keys()),
+                index=0,
+                key="wa_date_field_select",
+                help="Which date the range below applies to when pulling data from Weevo.",
+            )
+        if admin_date_field != "created":
+            _date_field_phrase = {
+                "delivery": "scheduled for delivery",
+                "pickup": "scheduled for pickup",
+                "delivered": "delivered",
+                "returned": "returned",
+            }.get(admin_date_field, admin_date_field)
+            st.caption(
+                f"ℹ️ Showing orders that were {_date_field_phrase} in this period, not "
+                f"necessarily created in it — sections that compare different statuses may show "
+                f"empty results, since this filter inherently returns orders in one particular status."
+            )
         if not date_col.empty:
             min_date, max_date = date_col.min().date(), date_col.max().date()
-            today_real = pd.Timestamp.now().date()
+            today_real = _cairo_now().date()
             with dcol1:
                 preset = st.selectbox(
                     "Date range",
@@ -975,7 +1016,7 @@ def render_analytics_page():
                 v2_source_note = "Uploaded Archive (load failed)"
         else:
             try:
-                df_v2 = _cached_v2_load(api_key, start_date=admin_start_str, end_date=admin_end_str)
+                df_v2 = _cached_v2_load(api_key, start_date=admin_start_str, end_date=admin_end_str, date_field=admin_date_field)
                 if not df_v2.empty:
                     df_v2 = enrich_areas_with_cache(df_v2)
                 v2_source_note = "Live API"
