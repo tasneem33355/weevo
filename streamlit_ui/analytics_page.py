@@ -1043,7 +1043,10 @@ def render_analytics_page():
             v2_min_date = v2_full_dated_dates.min().date() if not v2_full_dated_dates.empty else None
             v2_max_date = v2_full_dated_dates.max().date() if not v2_full_dated_dates.empty else None
 
-            v2_date_filter_active = bool(date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2 and "created_at" in df_v2_dated.columns)
+            v2_date_filter_active = bool(
+                date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2
+                and "created_at" in df_v2_dated.columns and admin_date_field == "created"
+            )
 
             df_v2 = pd.concat([df_v2_dated, df_v2_risk], ignore_index=True) if not df_v2_risk.empty else df_v2_dated.copy()
 
@@ -1211,7 +1214,9 @@ def render_analytics_page():
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<p class="wa-section-title" style="font-size:14px;">Courier performance (selected period)</p>', unsafe_allow_html=True)
 
-            if date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+            if admin_date_field != "created":
+                _perf_start, _perf_end = None, None
+            elif date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2:
                 _perf_start, _perf_end = date_range
             elif v2_min_date and v2_max_date:
                 _perf_start, _perf_end = v2_min_date, v2_max_date
@@ -1219,7 +1224,16 @@ def render_analytics_page():
                 _perf_start, _perf_end = None, None
 
             if _perf_start is None:
-                st.caption("No date range available to assess courier performance against yet.")
+                if admin_date_field != "created":
+                    st.caption(
+                        "Courier performance isn't shown for this 'Filter by' type — it's "
+                        "built around orders *created* in the period, and other filter types "
+                        "only return orders in one particular status, which would unfairly "
+                        "skew the comparison between couriers. Switch 'Filter by' back to "
+                        "'Create Date' to see this section."
+                    )
+                else:
+                    st.caption("No date range available to assess courier performance against yet.")
             else:
                 perf = courier_performance_by_period(df_v2, start_date=_perf_start, end_date=_perf_end)
                 if perf["by_courier"].empty:
