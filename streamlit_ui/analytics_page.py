@@ -263,11 +263,11 @@ def _kpi_card(icon: str, icon_bg: str, icon_color: str, label: str, value: str, 
     return card
 
 DATE_FIELD_LABELS = {
-    "Created": "created",
-    "Delivery target": "delivery",
-    "Pickup target": "pickup",
-    "Delivered (actual)": "delivered",
-    "Returned (actual)": "returned",
+    "Create Date": "created",
+    "Delivery Date": "delivery",
+    "Pickup Date": "pickup",
+    "Delivered Date": "delivered",
+    "Returned Date": "returned",
 }
 
 def render_analytics_page():
@@ -275,7 +275,7 @@ def render_analytics_page():
     _inject_css()
 
     _preset = st.session_state.get("wa_date_preset", "All time")
-    _date_field_label = st.session_state.get("wa_date_field_select", "Created")
+    _date_field_label = st.session_state.get("wa_date_field_select", "Create Date")
     admin_date_field = DATE_FIELD_LABELS.get(_date_field_label, "created")
     _today_real = _cairo_now().date()
     admin_start_date = None
@@ -684,7 +684,10 @@ def render_analytics_page():
     if selected_merchants:
         df = df[df["merchant_name"].isin(selected_merchants)]
 
-    date_filter_active = bool(date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2)
+    date_filter_active = bool(
+        date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2
+        and admin_date_field == "created"
+    )
     if date_filter_active:
         start, end = date_range
         df = df[(df["created_at"].dt.date >= start) & (df["created_at"].dt.date <= end)]
