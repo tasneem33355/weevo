@@ -697,9 +697,35 @@ def render_analytics_page():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
+    # Merchant Health (recent-vs-previous 7 days) needs a full 14-day
+    # window of created_at data to compare against — the main `df` above
+    # is scoped to whatever Date range/Filter-by the user picked, which is
+    # very often narrower than 14 days (or filtered by a different date
+    # field entirely), leaving the "previous 7 days" side with no data at
+    # all and making every merchant falsely show up as "New". Independent
+    # of that selection, always pull the last 14 days by created_at —
+    # falls back to `df` when a fresh Live API pull isn't possible
+    # (Uploaded Archive / Local cache / mock), same limitation as before
+    # in that case only.
+    df_merchant_health = df
+    if active_source_label == "Live API" and api_key:
+        _mh_end = _cairo_now().date()
+        _mh_start = _mh_end - timedelta(days=14)
+        try:
+            df_merchant_health = _cached_api_load(
+                api_key, start_date=_mh_start.strftime("%Y-%m-%d"),
+                end_date=_mh_end.strftime("%Y-%m-%d"), date_field="created",
+            )
+            if selected_areas and not df_merchant_health.empty:
+                df_merchant_health = df_merchant_health[df_merchant_health["area"].isin(selected_areas)]
+            if selected_merchants and not df_merchant_health.empty:
+                df_merchant_health = df_merchant_health[df_merchant_health["merchant_name"].isin(selected_merchants)]
+        except Exception:
+            df_merchant_health = df
+
     kpis = summary_kpis(df)
     status_counts = status_breakdown(df)
-    ma_for_breakdown = merchant_activity(df)
+    ma_for_breakdown = merchant_activity(df_merchant_health)
     watch_count = int((ma_for_breakdown["status"] == "Watch").sum()) if not ma_for_breakdown.empty else 0
 
     if not status_counts.empty:
@@ -952,7 +978,7 @@ def render_analytics_page():
         '<p class="wa-section-sub">Compares last 7 days of orders vs. the 7 days before that</p>',
         unsafe_allow_html=True,
     )
-    ma = merchant_activity(df, recent_days=7, compare_days=7)
+    ma = merchant_activity(df_merchant_health, recent_days=7, compare_days=7)
 
     rows_html = ""
     for _, row in ma.iterrows():
