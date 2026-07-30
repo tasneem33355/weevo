@@ -128,6 +128,7 @@ ARCHIVE_COLUMNS = [
     "courier_name", "courier_phone", "delivery_address", "delivery_city",
     "delivery_state", "amount", "delivery_date", "stored_at", "status",
     "attempts", "area", "received_at", "delivered_at", "delivery_hours",
+    "created_at",
 ]
 DEFAULT_ARCHIVE_PATH = "./data/analytics_archive.csv"
 AREA_CACHE_PATH = "./data/area_classification_cache.csv"
@@ -1007,6 +1008,12 @@ def load_real_shipments(db_path: str = "./weevo_chatbot.db") -> pd.DataFrame:
     df["delivered_at"] = pd.NaT
     df["delivery_hours"] = pd.NA
     df["delivery_hours"] = pd.to_numeric(df["delivery_hours"], errors="coerce")
+    # scheduler_shipment_data (this table) has no real creation-timestamp
+    # column — added as NaT rather than left missing so downstream code
+    # that expects a created_at column (date filter, courier performance,
+    # etc.) degrades gracefully ("no date data available") instead of
+    # raising a KeyError.
+    df["created_at"] = pd.NaT
     return df
 
 _MOCK_MERCHANTS = [
@@ -1083,6 +1090,12 @@ def generate_mock_shipments(n: int = 1800, days_back: int = 60, seed: int = 42) 
     df["delivery_date"] = pd.to_datetime(df["delivery_date"])
     df["received_at"] = pd.to_datetime(df["received_at"])
     df["delivered_at"] = pd.to_datetime(df["delivered_at"])
+    # Synthetic data has no separate "creation" event of its own — using
+    # received_at (the earliest timestamp already generated per row) as a
+    # reasonable stand-in, so downstream code that expects created_at
+    # (date filter, courier performance, etc.) has something real to work
+    # with instead of raising a KeyError.
+    df["created_at"] = df["received_at"]
     both_present = df["received_at"].notna() & df["delivered_at"].notna()
     df["delivery_hours"] = pd.NA
     df.loc[both_present, "delivery_hours"] = (
