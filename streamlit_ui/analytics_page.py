@@ -679,6 +679,7 @@ def render_analytics_page():
         st.form_submit_button("Apply filters")
 
     df = df_all.copy()
+    _client_side_filter_active = bool(selected_areas or selected_merchants)
     if selected_areas:
         df = df[df["area"].isin(selected_areas)]
     if selected_merchants:
@@ -689,8 +690,19 @@ def render_analytics_page():
         and admin_date_field == "created"
     )
     if date_filter_active:
+        _client_side_filter_active = True
         start, end = date_range
         df = df[(df["created_at"].dt.date >= start) & (df["created_at"].dt.date <= end)]
+
+    if _client_side_filter_active:
+        # df.attrs["status_counts"] (the API's own authoritative total for
+        # df_all's date range) survives .copy() and boolean-mask filtering
+        # in pandas — so once any of the filters above actually narrow df
+        # below df_all, that attrs-based total no longer matches what's
+        # really in df. Clear it so _authoritative_total_orders() falls
+        # back to a real local count of the filtered rows instead of
+        # silently showing df_all's unfiltered total.
+        df.attrs.pop("status_counts", None)
 
     if df.empty:
         st.info("No orders match the selected filters.")
@@ -727,6 +739,15 @@ def render_analytics_page():
     status_counts = status_breakdown(df)
     ma_for_breakdown = merchant_activity(df_merchant_health)
     watch_count = int((ma_for_breakdown["status"] == "Watch").sum()) if not ma_for_breakdown.empty else 0
+    # summary_kpis() computes merchants_at_risk via its own internal
+    # merchant_activity(df) call, using the same narrow/filtered df as
+    # everything else on the page — which suffers the same "previous 7
+    # days has no data" issue already fixed above for watch_count.
+    # Override with the count from ma_for_breakdown, which is already
+    # correctly computed from the independent 14-day df_merchant_health.
+    kpis["merchants_at_risk"] = (
+        int((ma_for_breakdown["status"] == "Declining").sum()) if not ma_for_breakdown.empty else 0
+    )
 
     if not status_counts.empty:
         top_statuses = status_counts.head(4)
