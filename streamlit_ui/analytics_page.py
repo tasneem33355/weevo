@@ -1363,7 +1363,7 @@ def render_analytics_page():
                     )
                     rows_html = ""
                     for _, row in perf["by_courier"].iterrows():
-                        avg_days = row.get("avg_days_to_close")
+                        avg_days = row.get("avg_days_to_close_later")
                         avg_days_display = f"{avg_days:.1f}d" if pd.notna(avg_days) else "–"
                         rows_html += _clean(f"""
                         <tr style="border-bottom:1px solid {BORDER};">
