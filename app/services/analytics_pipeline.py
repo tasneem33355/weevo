@@ -106,7 +106,7 @@ def _cairo_now() -> pd.Timestamp:
     return pd.Timestamp.now(tz=CAIRO_TZ).tz_localize(None)
 
 ADMIN_SHIPMENTS_PATH = "/api/v1/admin-5678vna9k6/shipments"
-ADMIN_PAGE_SIZE = 500
+ADMIN_PAGE_SIZE = 1000
 ADMIN_DEFAULT_COUNTRY_ID = 1
 ADMIN_DEFAULT_IN_BATCH = 0
 
