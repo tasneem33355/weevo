@@ -372,6 +372,32 @@ def merchant_revenue_leaderboard(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
+def courier_revenue_leaderboard(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Same idea as merchant_revenue_leaderboard() above, keyed by courier
+    instead of merchant: per-courier delivered+returned order count and
+    Weevo revenue, meant to be merged into the v1 courier_leaderboard()
+    tables (Least-active / All couriers) on courier_name. 'Unassigned'
+    excluded, same reason as v1's courier_leaderboard() — no captain on
+    record yet isn't a real courier to rank.
+
+    Returns columns: courier_name, delivered_returned_orders,
+    weevo_revenue. A courier with zero delivered/returned orders in the
+    loaded window simply won't have a row here — the caller should merge
+    with how="left" and fill missing values with 0, not drop those rows.
+    """
+    empty = pd.DataFrame(columns=["courier_name", "delivered_returned_orders", "weevo_revenue"])
+    if df.empty or "courier_name" not in df.columns or "status" not in df.columns:
+        return empty
+    completed = df[df["status"].isin(PRIMARY_STATUSES) & (df["courier_name"] != "Unassigned")]
+    if completed.empty:
+        return empty
+    return (
+        completed.groupby("courier_name")
+        .agg(delivered_returned_orders=("shipment_id", "count"), weevo_revenue=("weevo_revenue", "sum"))
+        .reset_index()
+    )
+
 def delivery_time_summary(df: pd.DataFrame) -> dict:
     """Actual pickup-to-completion time, delivered + returned combined —
     this replaces the old 'two hours from order creation' framing per
