@@ -270,9 +270,30 @@ DATE_FIELD_LABELS = {
     "Returned Date": "returned",
 }
 
+# Merchant Health comparison window — CEO-facing granularity picker.
+# Every option compares N days ending at the anchor date vs. the N days
+# immediately before that — same rolling-window logic as the original
+# fixed 7-vs-7, just with a selectable N instead of a hardcoded 7.
+MH_PERIOD_OPTIONS = {
+    "Day vs. previous day": 1,
+    "Last 7 days vs. previous 7": 7,
+    "Last 2 weeks vs. previous 2 weeks": 14,
+    "Last 3 weeks vs. previous 3 weeks": 21,
+    "Last 30 days vs. previous 30 days": 30,
+}
+MH_PERIOD_DEFAULT = "Last 7 days vs. previous 7"
+
 def render_analytics_page():
     st.markdown('<div id="weevo-analytics">', unsafe_allow_html=True)
     _inject_css()
+
+    # Read early (before the widget itself renders further down) — same
+    # pattern as _preset just below — so the KPI cards above the Merchant
+    # Health section, which are computed earlier in this script run, use
+    # the choice persisted from the previous run instead of always the
+    # default.
+    _mh_period_label = st.session_state.get("wa_mh_period", MH_PERIOD_DEFAULT)
+    mh_period_days = MH_PERIOD_OPTIONS.get(_mh_period_label, 7)
 
     _preset = st.session_state.get("wa_date_preset", "All time")
     _date_field_label = st.session_state.get("wa_date_field_select", "Create Date")
@@ -709,20 +730,26 @@ def render_analytics_page():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # Merchant Health (recent-vs-previous 7 days) needs a full 14-day
-    # window of created_at data to compare against — the main `df` above
-    # is scoped to whatever Date range/Filter-by the user picked, which is
-    # very often narrower than 14 days (or filtered by a different date
-    # field entirely), leaving the "previous 7 days" side with no data at
-    # all and making every merchant falsely show up as "New". Independent
-    # of that selection, always pull the last 14 days by created_at —
-    # falls back to `df` when a fresh Live API pull isn't possible
-    # (Uploaded Archive / Local cache / mock), same limitation as before
-    # in that case only.
+    # Merchant Health (recent-vs-previous mh_period_days) needs a full
+    # 2*mh_period_days window of created_at data to compare against — the
+    # main `df` above is scoped to whatever Date range/Filter-by the user
+    # picked, which is very often narrower than that (or filtered by a
+    # different date field entirely), leaving the "previous period" side
+    # with no data at all and making every merchant falsely show up as
+    # "New". Independent of that selection, always pull the last
+    # 2*mh_period_days by created_at, anchored at the END of the Date
+    # range the user picked above (not always "today" — a CEO comparing
+    # a past custom range wants the two windows counted back from where
+    # that range ends, not from right now) — falls back to `df` when a
+    # fresh Live API pull isn't possible (Uploaded Archive / Local cache
+    # / mock), same limitation as before in that case only.
     df_merchant_health = df
     if active_source_label == "Live API" and api_key:
-        _mh_end = _cairo_now().date()
-        _mh_start = _mh_end - timedelta(days=14)
+        if date_range and isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+            _mh_end = date_range[1]
+        else:
+            _mh_end = _cairo_now().date()
+        _mh_start = _mh_end - timedelta(days=2 * mh_period_days)
         try:
             df_merchant_health = _cached_api_load(
                 api_key, start_date=_mh_start.strftime("%Y-%m-%d"),
@@ -737,14 +764,16 @@ def render_analytics_page():
 
     kpis = summary_kpis(df)
     status_counts = status_breakdown(df)
-    ma_for_breakdown = merchant_activity(df_merchant_health)
+    ma_for_breakdown = merchant_activity(df_merchant_health, recent_days=mh_period_days, compare_days=mh_period_days)
     watch_count = int((ma_for_breakdown["status"] == "Watch").sum()) if not ma_for_breakdown.empty else 0
     # summary_kpis() computes merchants_at_risk via its own internal
-    # merchant_activity(df) call, using the same narrow/filtered df as
-    # everything else on the page — which suffers the same "previous 7
-    # days has no data" issue already fixed above for watch_count.
+    # merchant_activity(df) call (always the fixed 7-vs-7 default), using
+    # the same narrow/filtered df as everything else on the page — which
+    # suffers the same "previous period has no data" issue already fixed
+    # above for watch_count, AND doesn't reflect the CEO's chosen period.
     # Override with the count from ma_for_breakdown, which is already
-    # correctly computed from the independent 14-day df_merchant_health.
+    # correctly computed from the independent, correctly-sized
+    # df_merchant_health window at the selected mh_period_days.
     kpis["merchants_at_risk"] = (
         int((ma_for_breakdown["status"] == "Declining").sum()) if not ma_for_breakdown.empty else 0
     )
@@ -782,7 +811,7 @@ def render_analytics_page():
     if kpis["merchants_at_risk"] > 0:
         st.markdown(
             f'<div class="wa-alert-banner">⚠️ {kpis["merchants_at_risk"]} merchant(s) showing a '
-            f'significant drop in order volume this week — see Merchant Health below.</div>',
+            f'significant drop in order volume ({_mh_period_label.lower()}) — see Merchant Health below.</div>',
             unsafe_allow_html=True,
         )
 
@@ -995,11 +1024,25 @@ def render_analytics_page():
 
     st.markdown('<div class="wa-section" id="merchant-health">', unsafe_allow_html=True)
     st.markdown(
-        '<p class="wa-section-title">Merchant health — early warning</p>'
-        '<p class="wa-section-sub">Compares last 7 days of orders vs. the 7 days before that</p>',
+        '<p class="wa-section-title">Merchant health — early warning</p>',
         unsafe_allow_html=True,
     )
-    ma = merchant_activity(df_merchant_health, recent_days=7, compare_days=7)
+    st.selectbox(
+        "Compare",
+        list(MH_PERIOD_OPTIONS.keys()),
+        index=list(MH_PERIOD_OPTIONS.keys()).index(_mh_period_label),
+        key="wa_mh_period",
+        help="Which two windows to compare, counted back from the end of the Date range selected above "
+             "(or from today if no Date range is set).",
+    )
+    _mh_recent_label = "Today" if mh_period_days == 1 else f"Last {mh_period_days} days"
+    _mh_previous_label = "Yesterday" if mh_period_days == 1 else f"Previous {mh_period_days} days"
+    st.markdown(
+        f'<p class="wa-section-sub">Compares {_mh_recent_label.lower()} of orders vs. the '
+        f'{_mh_previous_label.lower()} before that</p>',
+        unsafe_allow_html=True,
+    )
+    ma = merchant_activity(df_merchant_health, recent_days=mh_period_days, compare_days=mh_period_days)
 
     rows_html = ""
     for _, row in ma.iterrows():
@@ -1021,8 +1064,8 @@ def render_analytics_page():
         <thead>
             <tr style="border-bottom:2px solid {BORDER};">
                 <th style="text-align:left; padding:6px; font-size:12px; color:{MUTED};">Merchant</th>
-                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Last 7 days</th>
-                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Previous 7 days</th>
+                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">{_mh_recent_label}</th>
+                <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">{_mh_previous_label}</th>
                 <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Change</th>
                 <th style="text-align:right; padding:6px; font-size:12px; color:{MUTED};">Status</th>
             </tr>
