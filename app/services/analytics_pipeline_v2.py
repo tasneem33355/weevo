@@ -343,6 +343,35 @@ def revenue_summary(df: pd.DataFrame) -> dict:
         "delivered_rate_pct": round(len(delivered) / len(completed) * 100, 1) if len(completed) else 0.0,
     }
 
+def merchant_revenue_leaderboard(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Per-merchant delivered+returned order count and Weevo revenue
+    (agreed_shipping_cost + transfer_fee — same definition used in
+    revenue_summary()/financial_breakdown() above), meant to be merged
+    into the v1 merchant_leaderboard() tables (Top / Least-active / All
+    active merchants) on merchant_name. Cancelled and still-in-flight
+    orders are excluded — they haven't generated completed revenue for
+    Weevo. 'Unknown' merchant excluded too, same reason as v1's
+    merchant_leaderboard() — it's a data-quality placeholder, not a
+    merchant.
+
+    Returns columns: merchant_name, delivered_returned_orders,
+    weevo_revenue. A merchant with zero delivered/returned orders in the
+    loaded window simply won't have a row here — the caller should merge
+    with how="left" and fill missing values with 0, not drop those rows.
+    """
+    empty = pd.DataFrame(columns=["merchant_name", "delivered_returned_orders", "weevo_revenue"])
+    if df.empty or "merchant_name" not in df.columns or "status" not in df.columns:
+        return empty
+    completed = df[df["status"].isin(PRIMARY_STATUSES) & (df["merchant_name"] != "Unknown")]
+    if completed.empty:
+        return empty
+    return (
+        completed.groupby("merchant_name")
+        .agg(delivered_returned_orders=("shipment_id", "count"), weevo_revenue=("weevo_revenue", "sum"))
+        .reset_index()
+    )
+
 def delivery_time_summary(df: pd.DataFrame) -> dict:
     """Actual pickup-to-completion time, delivered + returned combined —
     this replaces the old 'two hours from order creation' framing per
