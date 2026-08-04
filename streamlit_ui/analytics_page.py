@@ -72,6 +72,7 @@ from app.services.analytics_pipeline_v2 import (
     fetch_merchants,
     PRIMARY_STATUSES,
     merchant_revenue_leaderboard,
+    courier_revenue_leaderboard,
     DEFAULT_V2_ARCHIVE_PATH,
     append_to_v2_archive,
     load_v2_archive,
@@ -851,6 +852,58 @@ def render_analytics_page():
     st.bar_chart(ot.set_index("period")[["orders"]], y="orders", color=PURPLE, height=280)
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Delivered+returned Weevo revenue data (v2), fetched once here and
+    # shared by every courier AND merchant leaderboard table below
+    # (Least-active/All for each). Same cached v2 call + same date/area/
+    # merchant scope as the full Financial section further down this page
+    # — a cache hit there, not a second network round-trip. Errors are
+    # swallowed here (kept silent): the full error UI for this exact same
+    # fetch already lives in the Financial section below, so failure here
+    # just leaves the new columns at 0 everywhere instead of duplicating
+    # that error banner higher up the page.
+    def _fetch_revenue_v2_df() -> pd.DataFrame:
+        if source_label == "Uploaded Archive":
+            try:
+                _rev_df = load_v2_archive(v2_archive_path)
+            except Exception:
+                return pd.DataFrame()
+        elif api_key:
+            try:
+                _rev_df = _cached_v2_load(
+                    api_key, start_date=admin_start_str, end_date=admin_end_str, date_field=admin_date_field,
+                )
+                if not _rev_df.empty:
+                    _rev_df = enrich_areas_with_cache(_rev_df)
+            except Exception:
+                return pd.DataFrame()
+        else:
+            return pd.DataFrame()
+        if _rev_df.empty:
+            return _rev_df
+        if selected_areas and "area" in _rev_df.columns:
+            _rev_df = _rev_df[_rev_df["area"].isin(selected_areas)]
+        if selected_merchants:
+            _rev_df = _rev_df[_rev_df["merchant_name"].isin(selected_merchants)]
+        return _rev_df
+
+    _revenue_v2_df = _fetch_revenue_v2_df()
+    merchant_revenue = merchant_revenue_leaderboard(_revenue_v2_df)
+    courier_revenue = courier_revenue_leaderboard(_revenue_v2_df)
+
+    def _with_revenue(leaderboard_df: pd.DataFrame, revenue_df: pd.DataFrame, key_col: str) -> pd.DataFrame:
+        """Left-merge delivered+returned count & Weevo revenue onto a
+        merchant_leaderboard()/courier_leaderboard() result — a merchant
+        or courier with none shows 0, never NaN or a dropped row."""
+        _attrs = dict(leaderboard_df.attrs)
+        out = leaderboard_df.merge(revenue_df, on=key_col, how="left") \
+            if not leaderboard_df.empty else leaderboard_df.copy()
+        for col, dtype in (("delivered_returned_orders", "int64"), ("weevo_revenue", "float64")):
+            if col not in out.columns:
+                out[col] = pd.Series(dtype=dtype)
+            out[col] = out[col].fillna(0).astype(dtype)
+        out.attrs.update(_attrs)  # merge() doesn't reliably propagate .attrs — restore explicitly
+        return out
+
     col_left, col_right = st.columns(2)
     with col_left:
         st.markdown('<div class="wa-section">', unsafe_allow_html=True)
@@ -910,7 +963,7 @@ def render_analytics_page():
             st.markdown("</div>", unsafe_allow_html=True)
 
     with least_col2:
-        least_couriers = courier_leaderboard(df, n=8, ascending=True)
+        least_couriers = _with_revenue(courier_leaderboard(df, n=8, ascending=True), courier_revenue, "courier_name")
         if not least_couriers.empty:
             st.markdown('<div class="wa-section">', unsafe_allow_html=True)
             st.markdown(
@@ -919,9 +972,15 @@ def render_analytics_page():
                 unsafe_allow_html=True,
             )
             st.dataframe(
-                least_couriers.rename(columns={"courier_name": "Courier", "orders": "Orders", "total_value": "Order value (EGP) (amount)"}),
+                least_couriers.rename(columns={
+                    "courier_name": "Courier", "orders": "Orders", "total_value": "Order value (EGP) (amount)",
+                    "delivered_returned_orders": "Delivered/returned", "weevo_revenue": "Weevo revenue (EGP)",
+                }),
                 use_container_width=True, hide_index=True, height=280,
-                column_config={"Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f")},
+                column_config={
+                    "Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f"),
+                    "Weevo revenue (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                },
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -931,7 +990,10 @@ def render_analytics_page():
         "Risk section below, which uses actual pickup/completion timestamps."
     )
 
-    all_couriers = courier_leaderboard(df, n=df["courier_name"].nunique() if "courier_name" in df.columns else 0)
+    all_couriers = _with_revenue(
+        courier_leaderboard(df, n=df["courier_name"].nunique() if "courier_name" in df.columns else 0),
+        courier_revenue, "courier_name",
+    )
     if not all_couriers.empty:
         all_couriers_col, all_couriers_chart_col = st.columns(2)
         with all_couriers_col:
@@ -942,9 +1004,15 @@ def render_analytics_page():
                 unsafe_allow_html=True,
             )
             st.dataframe(
-                all_couriers.rename(columns={"courier_name": "Courier", "orders": "Orders", "total_value": "Order value (EGP) (amount)"}),
+                all_couriers.rename(columns={
+                    "courier_name": "Courier", "orders": "Orders", "total_value": "Order value (EGP) (amount)",
+                    "delivered_returned_orders": "Delivered/returned", "weevo_revenue": "Weevo revenue (EGP)",
+                }),
                 use_container_width=True, hide_index=True, height=280,
-                column_config={"Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f")},
+                column_config={
+                    "Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f"),
+                    "Weevo revenue (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                },
             )
             st.markdown("</div>", unsafe_allow_html=True)
         with all_couriers_chart_col:
@@ -957,62 +1025,11 @@ def render_analytics_page():
             st.bar_chart(all_couriers.set_index("courier_name")[["orders"]], y="orders", color=PURPLE, height=280)
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # Delivered+returned order count & Weevo revenue per merchant, merged
-    # into the three merchant leaderboard tables below (Top / Least-active
-    # / All active). Same cached v2 fetch + same date/area/merchant scope
-    # as the full Financial section further down this page — a cache hit
-    # there, not a second network round-trip. Errors are swallowed here
-    # (kept silent): the full error UI for this exact same fetch already
-    # lives in the Financial section below, so failure here just leaves
-    # the two new columns at 0 for every merchant instead of duplicating
-    # that error banner a second time, higher up the page.
-    def _merchant_revenue_lookup() -> pd.DataFrame:
-        _empty = pd.DataFrame(columns=["merchant_name", "delivered_returned_orders", "weevo_revenue"])
-        if source_label == "Uploaded Archive":
-            try:
-                _rev_df = load_v2_archive(v2_archive_path)
-            except Exception:
-                return _empty
-        elif api_key:
-            try:
-                _rev_df = _cached_v2_load(
-                    api_key, start_date=admin_start_str, end_date=admin_end_str, date_field=admin_date_field,
-                )
-                if not _rev_df.empty:
-                    _rev_df = enrich_areas_with_cache(_rev_df)
-            except Exception:
-                return _empty
-        else:
-            return _empty
-        if _rev_df.empty:
-            return _empty
-        if selected_areas and "area" in _rev_df.columns:
-            _rev_df = _rev_df[_rev_df["area"].isin(selected_areas)]
-        if selected_merchants:
-            _rev_df = _rev_df[_rev_df["merchant_name"].isin(selected_merchants)]
-        return merchant_revenue_leaderboard(_rev_df)
-
-    merchant_revenue = _merchant_revenue_lookup()
-
-    def _with_revenue(leaderboard_df: pd.DataFrame) -> pd.DataFrame:
-        """Left-merge delivered+returned count & Weevo revenue onto a
-        merchant_leaderboard() result — a merchant with none shows 0,
-        never NaN or a dropped row."""
-        _attrs = dict(leaderboard_df.attrs)
-        out = leaderboard_df.merge(merchant_revenue, on="merchant_name", how="left") \
-            if not leaderboard_df.empty else leaderboard_df.copy()
-        for col, dtype in (("delivered_returned_orders", "int64"), ("weevo_revenue", "float64")):
-            if col not in out.columns:
-                out[col] = pd.Series(dtype=dtype)
-            out[col] = out[col].fillna(0).astype(dtype)
-        out.attrs.update(_attrs)  # merge() doesn't reliably propagate .attrs — restore explicitly
-        return out
-
     col_a, col_b = st.columns([1, 1.3])
     with col_a:
         st.markdown('<div class="wa-section" id="merchant-tables">', unsafe_allow_html=True)
         st.markdown('<p class="wa-section-title">Top merchants by orders</p>', unsafe_allow_html=True)
-        top_merch = _with_revenue(merchant_leaderboard(df, n=8))
+        top_merch = _with_revenue(merchant_leaderboard(df, n=8), merchant_revenue, "merchant_name")
         st.dataframe(
             top_merch.rename(columns={
                 "merchant_name": "Merchant", "orders": "Orders", "total_value": "Order value (EGP) (amount)",
@@ -1048,7 +1065,7 @@ def render_analytics_page():
 
     col_c, col_d = st.columns(2)
     with col_c:
-        least_merch = _with_revenue(merchant_leaderboard(df, n=8, ascending=True))
+        least_merch = _with_revenue(merchant_leaderboard(df, n=8, ascending=True), merchant_revenue, "merchant_name")
         if not least_merch.empty:
             st.markdown('<div class="wa-section">', unsafe_allow_html=True)
             st.markdown(
@@ -1070,7 +1087,7 @@ def render_analytics_page():
             st.markdown("</div>", unsafe_allow_html=True)
 
     with col_d:
-        all_merch = _with_revenue(merchant_leaderboard(df, n=df["merchant_name"].nunique() if "merchant_name" in df.columns else 0))
+        all_merch = _with_revenue(merchant_leaderboard(df, n=df["merchant_name"].nunique() if "merchant_name" in df.columns else 0), merchant_revenue, "merchant_name")
         if not all_merch.empty:
             st.markdown('<div class="wa-section">', unsafe_allow_html=True)
             st.markdown(
