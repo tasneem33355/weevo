@@ -345,58 +345,79 @@ def revenue_summary(df: pd.DataFrame) -> dict:
 
 def merchant_revenue_leaderboard(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Per-merchant delivered+returned order count and Weevo revenue
-    (agreed_shipping_cost + transfer_fee — same definition used in
-    revenue_summary()/financial_breakdown() above), meant to be merged
-    into the v1 merchant_leaderboard() tables (Top / Least-active / All
-    active merchants) on merchant_name. Cancelled and still-in-flight
-    orders are excluded — they haven't generated completed revenue for
-    Weevo. 'Unknown' merchant excluded too, same reason as v1's
-    merchant_leaderboard() — it's a data-quality placeholder, not a
-    merchant.
+    Per-merchant delivered/returned order counts and Weevo revenue,
+    split by status (agreed_shipping_cost + transfer_fee — same
+    definition used in revenue_summary()/financial_breakdown() above),
+    meant to be merged into the v1 merchant_leaderboard() tables
+    (Top / Least-active / All active merchants) on merchant_name.
+    Cancelled and still-in-flight orders are excluded — they haven't
+    generated completed revenue for Weevo. 'Unknown' merchant excluded
+    too, same reason as v1's merchant_leaderboard() — it's a
+    data-quality placeholder, not a merchant.
 
-    Returns columns: merchant_name, delivered_returned_orders,
-    weevo_revenue. A merchant with zero delivered/returned orders in the
-    loaded window simply won't have a row here — the caller should merge
-    with how="left" and fill missing values with 0, not drop those rows.
+    Returns columns: merchant_name, delivered_orders, returned_orders,
+    delivered_revenue, returned_revenue. A merchant with zero delivered
+    or zero returned orders in the loaded window simply won't have a
+    contribution for that status — the caller should merge with
+    how="left" and fill missing values with 0, not drop those rows.
     """
-    empty = pd.DataFrame(columns=["merchant_name", "delivered_returned_orders", "weevo_revenue"])
+    empty = pd.DataFrame(columns=[
+        "merchant_name", "delivered_orders", "returned_orders",
+        "delivered_revenue", "returned_revenue",
+    ])
     if df.empty or "merchant_name" not in df.columns or "status" not in df.columns:
         return empty
     completed = df[df["status"].isin(PRIMARY_STATUSES) & (df["merchant_name"] != "Unknown")]
     if completed.empty:
         return empty
-    return (
-        completed.groupby("merchant_name")
-        .agg(delivered_returned_orders=("shipment_id", "count"), weevo_revenue=("weevo_revenue", "sum"))
-        .reset_index()
+    grouped = (
+        completed.groupby(["merchant_name", "status"])
+        .agg(orders=("shipment_id", "count"), revenue=("weevo_revenue", "sum"))
+        .unstack("status", fill_value=0)
     )
+    grouped.columns = [f"{stat}_{metric}" for metric, stat in grouped.columns]
+    grouped = grouped.reset_index()
+    for col in ("delivered_orders", "returned_orders", "delivered_revenue", "returned_revenue"):
+        if col not in grouped.columns:
+            grouped[col] = 0
+    return grouped[["merchant_name", "delivered_orders", "returned_orders", "delivered_revenue", "returned_revenue"]]
 
 def courier_revenue_leaderboard(df: pd.DataFrame) -> pd.DataFrame:
     """
     Same idea as merchant_revenue_leaderboard() above, keyed by courier
-    instead of merchant: per-courier delivered+returned order count and
-    Weevo revenue, meant to be merged into the v1 courier_leaderboard()
-    tables (Least-active / All couriers) on courier_name. 'Unassigned'
-    excluded, same reason as v1's courier_leaderboard() — no captain on
-    record yet isn't a real courier to rank.
+    instead of merchant: per-courier delivered/returned order counts
+    and Weevo revenue, split by status, meant to be merged into the v1
+    courier_leaderboard() tables (Least-active / All couriers) on
+    courier_name. 'Unassigned' excluded, same reason as v1's
+    courier_leaderboard() — no captain on record yet isn't a real
+    courier to rank.
 
-    Returns columns: courier_name, delivered_returned_orders,
-    weevo_revenue. A courier with zero delivered/returned orders in the
-    loaded window simply won't have a row here — the caller should merge
-    with how="left" and fill missing values with 0, not drop those rows.
+    Returns columns: courier_name, delivered_orders, returned_orders,
+    delivered_revenue, returned_revenue. A courier with zero delivered
+    or zero returned orders in the loaded window simply won't have a
+    contribution for that status — the caller should merge with
+    how="left" and fill missing values with 0, not drop those rows.
     """
-    empty = pd.DataFrame(columns=["courier_name", "delivered_returned_orders", "weevo_revenue"])
+    empty = pd.DataFrame(columns=[
+        "courier_name", "delivered_orders", "returned_orders",
+        "delivered_revenue", "returned_revenue",
+    ])
     if df.empty or "courier_name" not in df.columns or "status" not in df.columns:
         return empty
     completed = df[df["status"].isin(PRIMARY_STATUSES) & (df["courier_name"] != "Unassigned")]
     if completed.empty:
         return empty
-    return (
-        completed.groupby("courier_name")
-        .agg(delivered_returned_orders=("shipment_id", "count"), weevo_revenue=("weevo_revenue", "sum"))
-        .reset_index()
+    grouped = (
+        completed.groupby(["courier_name", "status"])
+        .agg(orders=("shipment_id", "count"), revenue=("weevo_revenue", "sum"))
+        .unstack("status", fill_value=0)
     )
+    grouped.columns = [f"{stat}_{metric}" for metric, stat in grouped.columns]
+    grouped = grouped.reset_index()
+    for col in ("delivered_orders", "returned_orders", "delivered_revenue", "returned_revenue"):
+        if col not in grouped.columns:
+            grouped[col] = 0
+    return grouped[["courier_name", "delivered_orders", "returned_orders", "delivered_revenue", "returned_revenue"]]
 
 def delivery_time_summary(df: pd.DataFrame) -> dict:
     """Actual pickup-to-completion time, delivered + returned combined —
