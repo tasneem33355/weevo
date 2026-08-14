@@ -33,6 +33,7 @@ from app.services.analytics_pipeline import (
     top_areas,
     courier_leaderboard,
     merchant_leaderboard,
+    merchant_status_breakdown,
     merchant_activity,
     recent_orders,
     summary_kpis,
@@ -1122,6 +1123,54 @@ def render_analytics_page():
                 },
             )
             st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="wa-section" id="merchant-status-breakdown">', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="wa-section-title">Merchant orders by outcome</p>'
+        '<p class="wa-section-sub">Every merchant\'s orders in this window, split by what actually '
+        'happened to them — delivered, returned, cancelled, or still open in another status. Same '
+        'filtered data (area / merchant / date) as every table above.</p>',
+        unsafe_allow_html=True,
+    )
+    msb = merchant_status_breakdown(df)
+    if msb.empty:
+        st.info("No merchant data available for the current filter.")
+    else:
+        st.dataframe(
+            msb.rename(columns={
+                "merchant_name": "Merchant", "total_orders": "Total orders",
+                "delivered": "Delivered", "returned": "Returned",
+                "cancelled": "Cancelled", "other": "Other (still open)",
+            }),
+            use_container_width=True, hide_index=True, height=320,
+        )
+        msb_excluded = msb.attrs.get("excluded_unknown_count", 0)
+        if msb_excluded:
+            st.caption(f"{msb_excluded:,} order(s) excluded — no merchant name on record.")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        top_delivered = msb.sort_values("delivered", ascending=False).head(8)
+        top_returned = msb.sort_values("returned", ascending=False).head(8)
+        top_cancelled = msb.sort_values("cancelled", ascending=False).head(8)
+
+        msb_chart_col1, msb_chart_col2, msb_chart_col3 = st.columns(3)
+        with msb_chart_col1:
+            st.markdown('<p class="wa-section-title" style="font-size:13px;">Top merchants — delivered</p>', unsafe_allow_html=True)
+            st.bar_chart(top_delivered.set_index("merchant_name")[["delivered"]], y="delivered", color=TEAL, height=240)
+        with msb_chart_col2:
+            st.markdown('<p class="wa-section-title" style="font-size:13px;">Top merchants — returned</p>', unsafe_allow_html=True)
+            st.bar_chart(top_returned.set_index("merchant_name")[["returned"]], y="returned", color=AMBER, height=240)
+        with msb_chart_col3:
+            st.markdown('<p class="wa-section-title" style="font-size:13px;">Top merchants — cancelled</p>', unsafe_allow_html=True)
+            st.bar_chart(top_cancelled.set_index("merchant_name")[["cancelled"]], y="cancelled", color=RED, height=240)
+
+        st.caption(
+            "Cancelled = cancelled / bulk-shipment-closed / bulk-shipment-cancelled statuses combined. "
+            "'Other (still open)' covers every remaining status (available, on-delivery, in-transit, etc.) "
+            "— orders that haven't reached a final outcome yet."
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="wa-section" id="merchant-health">', unsafe_allow_html=True)
     st.markdown(
