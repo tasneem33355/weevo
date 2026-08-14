@@ -891,13 +891,17 @@ def render_analytics_page():
     courier_revenue = courier_revenue_leaderboard(_revenue_v2_df)
 
     def _with_revenue(leaderboard_df: pd.DataFrame, revenue_df: pd.DataFrame, key_col: str) -> pd.DataFrame:
-        """Left-merge delivered+returned count & Weevo revenue onto a
-        merchant_leaderboard()/courier_leaderboard() result — a merchant
-        or courier with none shows 0, never NaN or a dropped row."""
+        """Left-merge delivered/returned counts & Weevo revenue (split by
+        status) onto a merchant_leaderboard()/courier_leaderboard()
+        result — a merchant or courier with none shows 0, never NaN or a
+        dropped row."""
         _attrs = dict(leaderboard_df.attrs)
         out = leaderboard_df.merge(revenue_df, on=key_col, how="left") \
             if not leaderboard_df.empty else leaderboard_df.copy()
-        for col, dtype in (("delivered_returned_orders", "int64"), ("weevo_revenue", "float64")):
+        for col, dtype in (
+            ("delivered_orders", "int64"), ("returned_orders", "int64"),
+            ("delivered_revenue", "float64"), ("returned_revenue", "float64"),
+        ):
             if col not in out.columns:
                 out[col] = pd.Series(dtype=dtype)
             out[col] = out[col].fillna(0).astype(dtype)
@@ -974,12 +978,14 @@ def render_analytics_page():
             st.dataframe(
                 least_couriers.rename(columns={
                     "courier_name": "Courier", "orders": "Orders", "total_value": "Order value (EGP) (amount)",
-                    "delivered_returned_orders": "Delivered/returned", "weevo_revenue": "Weevo revenue (EGP)",
+                    "delivered_orders": "Delivered", "returned_orders": "Returned",
+                    "delivered_revenue": "Revenue delivered (EGP)", "returned_revenue": "Revenue returned (EGP)",
                 }),
                 use_container_width=True, hide_index=True, height=280,
                 column_config={
                     "Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f"),
-                    "Weevo revenue (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                    "Revenue delivered (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                    "Revenue returned (EGP)": st.column_config.NumberColumn(format="%.0f"),
                 },
             )
             st.markdown("</div>", unsafe_allow_html=True)
@@ -1006,12 +1012,14 @@ def render_analytics_page():
             st.dataframe(
                 all_couriers.rename(columns={
                     "courier_name": "Courier", "orders": "Orders", "total_value": "Order value (EGP) (amount)",
-                    "delivered_returned_orders": "Delivered/returned", "weevo_revenue": "Weevo revenue (EGP)",
+                    "delivered_orders": "Delivered", "returned_orders": "Returned",
+                    "delivered_revenue": "Revenue delivered (EGP)", "returned_revenue": "Revenue returned (EGP)",
                 }),
                 use_container_width=True, hide_index=True, height=280,
                 column_config={
                     "Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f"),
-                    "Weevo revenue (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                    "Revenue delivered (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                    "Revenue returned (EGP)": st.column_config.NumberColumn(format="%.0f"),
                 },
             )
             st.markdown("</div>", unsafe_allow_html=True)
@@ -1033,12 +1041,14 @@ def render_analytics_page():
         st.dataframe(
             top_merch.rename(columns={
                 "merchant_name": "Merchant", "orders": "Orders", "total_value": "Order value (EGP) (amount)",
-                "delivered_returned_orders": "Delivered/returned", "weevo_revenue": "Weevo revenue (EGP)",
+                "delivered_orders": "Delivered", "returned_orders": "Returned",
+                "delivered_revenue": "Revenue delivered (EGP)", "returned_revenue": "Revenue returned (EGP)",
             }),
             use_container_width=True, hide_index=True, height=300,
             column_config={
                 "Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f"),
-                "Weevo revenue (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                "Revenue delivered (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                "Revenue returned (EGP)": st.column_config.NumberColumn(format="%.0f"),
             },
         )
         excluded = top_merch.attrs.get("excluded_unknown_count", 0)
@@ -1076,12 +1086,14 @@ def render_analytics_page():
             st.dataframe(
                 least_merch.rename(columns={
                     "merchant_name": "Merchant", "orders": "Orders", "total_value": "Order value (EGP) (amount)",
-                    "delivered_returned_orders": "Delivered/returned", "weevo_revenue": "Weevo revenue (EGP)",
+                    "delivered_orders": "Delivered", "returned_orders": "Returned",
+                    "delivered_revenue": "Revenue delivered (EGP)", "returned_revenue": "Revenue returned (EGP)",
                 }),
                 use_container_width=True, hide_index=True, height=280,
                 column_config={
                     "Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f"),
-                    "Weevo revenue (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                    "Revenue delivered (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                    "Revenue returned (EGP)": st.column_config.NumberColumn(format="%.0f"),
                 },
             )
             st.markdown("</div>", unsafe_allow_html=True)
@@ -1099,12 +1111,14 @@ def render_analytics_page():
             st.dataframe(
                 all_merch.rename(columns={
                     "merchant_name": "Merchant", "orders": "Orders", "total_value": "Order value (EGP) (amount)",
-                    "delivered_returned_orders": "Delivered/returned", "weevo_revenue": "Weevo revenue (EGP)",
+                    "delivered_orders": "Delivered", "returned_orders": "Returned",
+                    "delivered_revenue": "Revenue delivered (EGP)", "returned_revenue": "Revenue returned (EGP)",
                 }),
                 use_container_width=True, hide_index=True, height=280,
                 column_config={
                     "Order value (EGP) (amount)": st.column_config.NumberColumn(format="%.0f"),
-                    "Weevo revenue (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                    "Revenue delivered (EGP)": st.column_config.NumberColumn(format="%.0f"),
+                    "Revenue returned (EGP)": st.column_config.NumberColumn(format="%.0f"),
                 },
             )
             st.markdown("</div>", unsafe_allow_html=True)
