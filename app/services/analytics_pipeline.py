@@ -116,6 +116,12 @@ _ADMIN_TOKEN_CACHE: dict = {}
 _ADMIN_TOKEN_CACHE_LOCK = threading.Lock()
 
 HEAVY_STATUSES_V1 = {"delivered", "returned"}
+
+# Same cancelled/closed status set as analytics_pipeline_v2.TERMINAL_STATUSES,
+# minus "delivered"/"returned" (those get their own buckets everywhere this
+# is used). Kept as a local literal instead of importing from v2 — v2 already
+# imports from this module, so importing back would create a circular import.
+CANCELLED_STATUSES = {"cancelled", "bulk-shipment-closed", "bulk-shipment-cancelled"}
 GATEWAY_ERROR_CODES_V1 = {502, 503, 504}
 REQUEST_TIMEOUT_V1 = 20
 MAX_RETRIES_V1 = 1
@@ -1310,6 +1316,64 @@ def merchant_leaderboard(df: pd.DataFrame, n: int = 10, ascending: bool = False)
         .sort_values("orders", ascending=ascending)
         .head(n)
     )
+    result.attrs["excluded_unknown_count"] = excluded_count
+    return result
+
+def merchant_status_breakdown(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Per-merchant order counts, split by outcome: delivered, returned,
+    cancelled (status in CANCELLED_STATUSES — cancelled / bulk-shipment-
+    closed / bulk-shipment-cancelled, same set as v2's TERMINAL_STATUSES
+    minus delivered/returned), and other (every remaining status —
+    available, on-delivery, in-transit, etc. — bundled together since
+    those are simply still open/in-flight, not a distinct outcome yet).
+
+    Companion to merchant_leaderboard() (total orders + total value, no
+    status split) and status_breakdown() (does this same split, but
+    aggregated across ALL merchants instead of per-merchant). Built from
+    the same `df` used everywhere else on the page, so it automatically
+    follows whatever area/merchant/date filters are active — same as
+    every other v1 table.
+
+    'Unknown' merchant excluded, same reason as merchant_leaderboard()
+    above — it's a data-quality placeholder, not a merchant that could
+    be analyzed. Excluded count via .attrs.
+
+    Returns columns: merchant_name, total_orders, delivered, returned,
+    cancelled, other — sorted by total_orders descending (same default
+    ordering as merchant_leaderboard()).
+    """
+    cols = ["merchant_name", "total_orders", "delivered", "returned", "cancelled", "other"]
+    empty = pd.DataFrame(columns=cols)
+    if df.empty or "merchant_name" not in df.columns or "status" not in df.columns:
+        empty.attrs["excluded_unknown_count"] = 0
+        return empty
+    excluded_count = int((df["merchant_name"] == "Unknown").sum())
+    known = df[df["merchant_name"] != "Unknown"].copy()
+    if known.empty:
+        empty.attrs["excluded_unknown_count"] = excluded_count
+        return empty
+
+    def _bucket(status):
+        if status in ("delivered", "returned"):
+            return status
+        if status in CANCELLED_STATUSES:
+            return "cancelled"
+        return "other"
+
+    known["_status_bucket"] = known["status"].apply(_bucket)
+    grouped = (
+        known.groupby(["merchant_name", "_status_bucket"])["shipment_id"]
+        .count()
+        .unstack("_status_bucket", fill_value=0)
+    )
+    for col in ("delivered", "returned", "cancelled", "other"):
+        if col not in grouped.columns:
+            grouped[col] = 0
+    grouped = grouped[["delivered", "returned", "cancelled", "other"]].reset_index()
+    grouped["total_orders"] = grouped[["delivered", "returned", "cancelled", "other"]].sum(axis=1)
+    result = grouped[cols].sort_values("total_orders", ascending=False).reset_index(drop=True)
+    result.columns.name = None
     result.attrs["excluded_unknown_count"] = excluded_count
     return result
 
